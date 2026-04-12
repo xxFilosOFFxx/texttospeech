@@ -1523,26 +1523,31 @@ def tkinter_gui_mode():
 def main():
     """
     Точка входа в приложение.
-    Парсит аргументы и запускает соответствующий режим (GUI/CLI).
+    Парсит аргументы и запускает соответствующий режим (GUI/CLI/бот).
     """
     parser = argparse.ArgumentParser(description="Text to Speech Converter")
     parser.add_argument("--input", "-i", help="Входной файл")
     parser.add_argument("--output", "-o", help="Папка для сохранения")
     parser.add_argument("--voice", "-v", default="ru-RU-SvetlanaNeural", help="Голос")
     parser.add_argument("--split", "-s", type=int, default=0, help="Разделить на куски (минуты)")
-    parser.add_argument("--bot", "-b", help="Запустить Telegram бот с токеном")
+    parser.add_argument("--bot", "-b", help="Запустить Telegram бот (используйте bot.py)")
     parser.add_argument("--gui", "-g", action="store_true", help="Запустить GUI")
     parser.add_argument("--tts", "-t", default="edge", choices=["edge", "silero"], help="Тип TTS движка: edge (по умолчанию) или silero")
     
     args = parser.parse_args()
     
-    # Запуск GUI если указан флаг или нет аргументов и GUI доступен
-    if args.gui or (not args.input and not args.bot and GUI_AVAILABLE):
+    # Telegram бот - используйте bot.py для запуска
+    if args.bot:
+        print("Для запуска бота используйте: python bot.py TOKEN")
+        sys.exit(1)
+    # GUI
+    elif args.gui or (not args.input and GUI_AVAILABLE):
         if GUI_AVAILABLE:
             gui_mode()
         else:
             print("GUI недоступен. Используйте консольный режим.")
             cli_mode(args)
+    # CLI
     else:
         cli_mode(args)
 

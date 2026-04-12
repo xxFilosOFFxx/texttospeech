@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""
+Telegram Bot запускатель.
+Запускает бота в main thread для избежания проблем с asyncio signal handler.
+"""
+
+import asyncio
+import signal
+import sys
+import os
+
+# Добавляем путь для импорта
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import argparse
+import tempfile
+import shutil
+
+from tts_converter import (
+    extract_text_from_file, split_text_into_chunks, 
+    convert_all_chunks_async, convert_all_chunks_silero,
+    PYDUB_AVAILABLE, SILERO_AVAILABLE
+)
+import logging
+import soundfile as sf
+import numpy as np
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Константы
+SUPPORTED_EXTENSIONS = ['txt', 'pdf', 'epub', 'fb2']
+EDGE_VOICES = [
+    "ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru-RU-ElizabethNeural",
+    "en-US-JennyNeural", "en-US-GuyNeural", "UK-RomanNeural", "UK-LydiaNeural"
+]
+SILERO_VOICES = ["xenia", "aidar", "aleksandr", "alyona", "anna", "danil", "dasha", "max", "pavel"]
+
+# Хранилище сессий
+user_sessions = {}
+
+class UserSession:
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.file_path = None
+        self.file_name = None
+        self.split_duration = 0
+        self.tts_type = "edge"
+        self.voice = "ru-RU-SvetlanaNeural"
+        self.waiting_for = None
+
+def get_session(user_id):
+    if user_id not in user_sessions:
+        user_sessions[user_id] = UserSession(user_id)
+    return user_sessions[user_id]
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎙 <b>Text to Speech Converter</b>\n\n"
+        "Отправьте мне текстовый файл (TXT, PDF, EPUB, FB2) - я конвертирую его в MP3 аудио.\n\n"
+        "После отправки файла я задам несколько вопросов о параметрах конвертации.",
+        parse_mode="HTML"
+    )
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = get_session(user_id)
+    
+    try:
+        file = await update.message.document.get_file()
+        ext = update.message.document.file_name.split('.')[-1].lower()
+        file_name = update.message.document.file_name
+        
+        if ext not in SUPPORTED_EXTENSIONS:
+            await update.message.reply_text(
+                f"❌ <b>Неверный формат файла!</b>\n\n"
+                f"Поддерживаемые форматы: <code>{', '.join(SUPPORTED_EXTENSIONS)}</code>\n\n"
+                f"Вы отправили: <code>.{ext}</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        session.file_name = file_name
+        temp_dir = tempfile.mkdtemp()
+        session.file_path = os.path.join(temp_dir, file_name)
+        await file.download_to_drive(session.file_path)
+        
+        await update.message.reply_text(
+            f"✅ <b>Файл получен!</b>\n\n"
+            f"📄 <code>{file_name}</code>\n\n"
+            f"<b>Шаг 1 из 3</b>\n"
+            f"На сколько минут разбить аудио файл?\n"
+            f"Отправьте число (например: <code>30</code>)\n"
+            f"Если <code>0</code> - весь текст в одном файле.",
+            parse_mode="HTML"
+        )
+        session.waiting_for = "split"
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке документа: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        if session.file_path and os.path.exists(os.path.dirname(session.file_path)):
+            try:
+                shutil.rmtree(os.path.dirname(session.file_path))
+            except:
+                pass
+        session.file_path = None
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = get_session(user_id)
+    text = update.message.text.strip()
+    
+    if not session.waiting_for or not session.file_path:
+        await update.message.reply_text("Отправьте файл для конвертации или /start для начала.")
+        return
+    
+    try:
+        if session.waiting_for == "split":
+            try:
+                split_val = int(text)
+                if split_val < 0:
+                    await update.message.reply_text("❌ Число должно быть положительным.")
+                    return
+                session.split_duration = split_val
+            except ValueError:
+                await update.message.reply_text("❌ Введите число. Например: 30")
+                return
+            
+            split_text = "одним файлом" if split_val == 0 else f"по {split_val} минут"
+            await update.message.reply_text(
+                f"✅ Разбиение: <b>{split_text}</b>\n\n"
+                f"<b>Шаг 2 из 3</b>\n"
+                f"Выберите движок TTS:\n"
+                f"<code>1</code> - Edge TTS (онлайн)\n"
+                f"<code>2</code> - Silero (офлайн)\n\n"
+                f"Отправьте <code>1</code> или <code>2</code>",
+                parse_mode="HTML"
+            )
+            session.waiting_for = "engine"
+        
+        elif session.waiting_for == "engine":
+            if text == "1":
+                session.tts_type = "edge"
+                voices = EDGE_VOICES
+            elif text == "2":
+                if not SILERO_AVAILABLE:
+                    await update.message.reply_text("❌ Silero не установлен. Использую Edge TTS.")
+                    session.tts_type = "edge"
+                    voices = EDGE_VOICES
+                else:
+                    session.tts_type = "silero"
+                    voices = SILERO_VOICES
+            else:
+                await update.message.reply_text("Введите 1 или 2")
+                return
+            
+            voice_list = "\n".join([f"<code>{v}</code>" for v in voices])
+            engine_name = "Edge TTS" if session.tts_type == "edge" else "Silero"
+            await update.message.reply_text(
+                f"✅ Движок: <b>{engine_name}</b>\n\n"
+                f"<b>Шаг 3 из 3</b>\n"
+                f"Выберите голос:\n\n{voice_list}",
+                parse_mode="HTML"
+            )
+            session.waiting_for = "voice"
+        
+        elif session.waiting_for == "voice":
+            session.voice = text
+            
+            await update.message.reply_text(
+                f"✅ Голос: <b>{text}</b>\n\n"
+                f"🚀 <b>Начинаю конвертацию...</b>",
+                parse_mode="HTML"
+            )
+            
+            session.waiting_for = None
+            await process_and_send(update, session)
+            
+    except Exception as e:
+        logger.error(f"Ошибка в handle_text: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        session.waiting_for = None
+
+async def process_and_send(update: Update, session):
+    user_id = update.effective_user.id
+    
+    try:
+        await update.message.reply_text("📖 Извлекаю текст из файла...")
+        text = extract_text_from_file(session.file_path)
+        if not text.strip():
+            await update.message.reply_text("❌ Не удалось извлечь текст из файла.")
+            return
+        
+        await update.message.reply_text("✂️ Разбиваю текст на части...")
+        chunks = split_text_into_chunks(text, tts_type=session.tts_type)
+        num_chunks = len(chunks)
+        
+        temp_dir = os.path.dirname(session.file_path)
+        ext = ".wav" if session.tts_type == "silero" else ".mp3"
+        temp_files = [os.path.join(temp_dir, f"part{i}{ext}") for i in range(num_chunks)]
+        
+        progress_msg = await update.message.reply_text(
+            f"🎙 Конвертирую...\n0/{num_chunks} частей",
+            parse_mode="HTML"
+        )
+        
+        if session.tts_type == "silero":
+            convert_all_chunks_silero(chunks, temp_files, session.voice)
+        else:
+            last_update = 0
+            async def progress_callback(p):
+                nonlocal last_update
+                current = int(p * num_chunks / 100)
+                if current > last_update and current % 10 == 0:
+                    last_update = current
+                    try:
+                        await progress_msg.edit_text(
+                            f"🎙 Конвертирую...\n{current}/{num_chunks} частей",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
+            
+            await convert_all_chunks_async(chunks, temp_files, session.voice, progress_callback, "+0%")
+        
+        await progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML")
+        
+        # Объединение
+        await update.message.reply_text("🔗 Объединяю файлы...")
+        existing_files = [f for f in temp_files if os.path.exists(f)]
+        
+        if not existing_files:
+            await update.message.reply_text("❌ Ошибка: не создано ни одного файла.")
+            return
+        
+        audios = []
+        for f in existing_files:
+            audio_data, sr = sf.read(f)
+            audios.append(audio_data)
+        combined_audio = np.concatenate(audios)
+        
+        duration_sec = len(combined_audio) / 48000
+        await update.message.reply_text(f"📊 Длительность: {duration_sec/60:.1f} мин", parse_mode="HTML")
+        
+        # Разбиение если нужно
+        max_duration_sec = session.split_duration * 60
+        final_files = []
+        
+        if session.split_duration > 0 and duration_sec > max_duration_sec:
+            await update.message.reply_text(f"✂️ Разбиваю на куски по {session.split_duration} минут...")
+            combined_path = os.path.join(temp_dir, "combined.wav")
+            sf.write(combined_path, combined_audio, 48000)
+            
+            if PYDUB_AVAILABLE:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_wav(combined_path)
+                duration_ms = session.split_duration * 60 * 1000
+                
+                for i in range(0, len(audio), duration_ms):
+                    chunk = audio[i:i+duration_ms]
+                    part_file = os.path.join(temp_dir, f"output_part{len(final_files)+1}.mp3")
+                    chunk.export(part_file, format="mp3")
+                    final_files.append(part_file)
+            else:
+                final_path = os.path.join(temp_dir, "output.mp3")
+                sf.write(final_path.replace('.mp3', '.wav'), combined_audio, 48000)
+                final_files.append(final_path)
+        else:
+            final_path = os.path.join(temp_dir, "output.mp3")
+            sf.write(final_path.replace('.mp3', '.wav'), combined_audio, 48000)
+            if PYDUB_AVAILABLE:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_wav(final_path.replace('.mp3', '.wav'))
+                audio.export(final_path, format="mp3")
+            final_files.append(final_path)
+        
+        # Отправка файлов
+        await update.message.reply_text(f"📤 Отправляю {len(final_files)} файлов...", parse_mode="HTML")
+        
+        for f in final_files:
+            try:
+                with open(f, "rb") as file:
+                    await update.message.reply_audio(file)
+            except Exception as e:
+                logger.error(f"Ошибка отправки {f}: {e}")
+        
+        await update.message.reply_text("✅ <b>Готово!</b>", parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+    
+    finally:
+        if session.file_path and os.path.exists(os.path.dirname(session.file_path)):
+            try:
+                shutil.rmtree(os.path.dirname(session.file_path))
+            except:
+                pass
+        user_sessions[user_id] = UserSession(user_id)
+
+async def main():
+    parser = argparse.ArgumentParser(description="Telegram Bot")
+    parser.add_argument("token", help="Telegram Bot Token")
+    args = parser.parse_args()
+    
+    application = Application.builder().token(args.token).build()
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    print("Telegram бот запущен...")
+    
+    # Запускаем с обработкой сигналов
+    loop = asyncio.get_event_loop()
+    
+    # Обработка Ctrl+C
+    def signal_handler(sig, frame):
+        print("\nОстановка бота...")
+        application.stop()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    await application.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())

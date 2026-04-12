@@ -7,6 +7,16 @@ Text to Speech Converter
 
 import os
 import sys
+
+# Автоматическая активация виртуального окружения (до импортов)
+venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
+if os.path.exists(venv_path):
+    for subdir in ['lib', 'lib64']:
+        site_packages = os.path.join(venv_path, subdir, 'python3.14', 'site-packages')
+        if os.path.exists(site_packages) and site_packages not in sys.path:
+            sys.path.insert(0, site_packages)
+            break
+
 import argparse
 import tempfile
 import shutil
@@ -1541,8 +1551,8 @@ def main():
         print("Для запуска бота используйте: python bot.py TOKEN")
         sys.exit(1)
     # GUI
-    elif args.gui or (not args.input and GUI_AVAILABLE):
-        if GUI_AVAILABLE:
+    elif args.gui or (not args.input and (GUI_AVAILABLE or PYQT_AVAILABLE)):
+        if PYQT_AVAILABLE or GUI_AVAILABLE:
             gui_mode()
         else:
             print("GUI недоступен. Используйте консольный режим.")

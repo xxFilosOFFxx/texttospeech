@@ -9,6 +9,15 @@ import signal
 import sys
 import os
 
+# Автоматическая активация виртуального окружения (до импортов)
+venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
+if os.path.exists(venv_path):
+    for subdir in ['lib', 'lib64']:
+        site_packages = os.path.join(venv_path, subdir, 'python3.14', 'site-packages')
+        if os.path.exists(site_packages) and site_packages not in sys.path:
+            sys.path.insert(0, site_packages)
+            break
+
 # Добавляем путь для импорта
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

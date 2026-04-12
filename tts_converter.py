@@ -248,43 +248,40 @@ async def convert_text_to_audio(text, output_path, voice="ru-RU-SvetlanaNeural",
 def split_audio(input_path, output_dir, prefix, duration_minutes):
     """
     Разделяет аудио файл на части заданной длительности.
-    Использует формат WAV для чтения.
+    Использует pydub для работы с MP3/WAV.
     """
     if duration_minutes <= 0:
         return [input_path]
     
     logger.info(f"Разделение файла {input_path} на куски по {duration_minutes} минут...")
     
-    import wave
     try:
-        with wave.open(input_path, 'rb') as wav:
-            frames = wav.getnframes()
-            rate = wav.getframerate()
-            duration_seconds = frames / rate
-            logger.info(f"Длительность файла: {duration_seconds} сек ({duration_seconds/60:.1f} мин)")
+        if PYDUB_AVAILABLE:
+            audio = AudioSegment.from_file(input_path)
+            duration_ms = len(audio)
+            chunk_duration_ms = duration_minutes * 60 * 1000
             
-            if duration_seconds < duration_minutes * 60:
+            if duration_ms < chunk_duration_ms:
                 logger.info("Файл короче указанной длительности, разделение не нужно")
                 return [input_path]
             
-            frames_per_chunk = int(rate * duration_minutes * 60)
             files = []
             chunk_num = 1
             
-            while True:
-                chunk_frames = wav.readframes(frames_per_chunk)
-                if not chunk_frames:
-                    break
-                
+            while len(audio) > chunk_duration_ms:
+                chunk = audio[:chunk_duration_ms]
                 output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.mp3")
                 logger.info(f"Создание части {chunk_num}: {output_file}")
-                
-                with wave.open(output_file, 'wb') as out_wav:
-                    out_wav.setparams(wav.getparams())
-                    out_wav.writeframes(chunk_frames)
-                
+                chunk.export(output_file, format="mp3")
                 files.append(output_file)
+                audio = audio[chunk_duration_ms:]
                 chunk_num += 1
+            
+            if len(audio) > 0:
+                output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.mp3")
+                logger.info(f"Создание части {chunk_num}: {output_file}")
+                audio.export(output_file, format="mp3")
+                files.append(output_file)
             
             if files:
                 try:
@@ -294,7 +291,34 @@ def split_audio(input_path, output_dir, prefix, duration_minutes):
             
             logger.info(f"Разделение завершено, создано {len(files)} файлов")
             return files
+        else:
+            import soundfile as sf
+            import numpy as np
+            data, sr = sf.read(input_path)
+            duration_sec = len(data) / sr
+            chunk_samples = int(sr * duration_minutes * 60)
             
+            if duration_sec < duration_minutes * 60:
+                return [input_path]
+            
+            files = []
+            chunk_num = 1
+            
+            for i in range(0, len(data), chunk_samples):
+                chunk = data[i:i + chunk_samples]
+                output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.wav")
+                logger.info(f"Создание части {chunk_num}: {output_file}")
+                sf.write(output_file, chunk, sr)
+                files.append(output_file)
+                chunk_num += 1
+            
+            if files:
+                try:
+                    os.remove(input_path)
+                except:
+                    pass
+            
+            return files
     except Exception as e:
         logger.error(f"Ошибка разделения: {e}")
         return [input_path]

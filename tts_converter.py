@@ -946,15 +946,17 @@ def run_telegram_bot(token, output_dir, default_voice="ru-RU-SvetlanaNeural", de
             # Очищаем сессию
             user_sessions[user_id] = UserSession(user_id)
     
-    # Настройка приложения
-    application = Application.builder().token(token).build()
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    async def run_bot():
+        application = Application.builder().token(token).build()
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        
+        print("Telegram бот запущен. Нажмите Ctrl+C для остановки.")
+        await application.run_polling()
     
-    print("Telegram бот запущен. Нажмите Ctrl+C для остановки.")
-    application.run_polling()
+    asyncio.run(run_bot())
 
 
 def cli_mode(args):

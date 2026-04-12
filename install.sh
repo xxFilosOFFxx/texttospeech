@@ -62,6 +62,8 @@ install_python_deps() {
     
     ./venv/bin/pip install -r requirements.txt
     
+    ./venv/bin/pip install edge-tts
+    
     echo "Python зависимости установлены"
 }
 

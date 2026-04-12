@@ -248,42 +248,122 @@ async def convert_text_to_audio(text, output_path, voice="ru-RU-SvetlanaNeural",
 def split_audio(input_path, output_dir, prefix, duration_minutes):
     """
     Разделяет аудио файл на части заданной длительности.
-    Использует pydub для работы с MP3/WAV.
     """
     if duration_minutes <= 0:
         return [input_path]
     
     logger.info(f"Разделение файла {input_path} на куски по {duration_minutes} минут...")
     
+    is_mp3 = input_path.lower().endswith('.mp3')
+    
     try:
-        if PYDUB_AVAILABLE:
-            audio = AudioSegment.from_file(input_path)
-            duration_ms = len(audio)
-            chunk_duration_ms = duration_minutes * 60 * 1000
+        # Пробуем через pydub если работает
+        if PYDUB_AVAILABLE and is_mp3:
+            try:
+                audio = AudioSegment.from_file(input_path)
+                duration_sec = len(audio) / 1000
+                logger.info(f"Длительность: {duration_sec:.1f} сек ({duration_sec/60:.1f} мин)")
+                
+                if duration_sec < duration_minutes * 60:
+                    logger.info("Файл короче указанной длительности")
+                    return [input_path]
+                
+                chunk_duration_ms = duration_minutes * 60 * 1000
+                files = []
+                chunk_num = 1
+                
+                while len(audio) > chunk_duration_ms:
+                    chunk = audio[:chunk_duration_ms]
+                    output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.mp3")
+                    logger.info(f"Создание части {chunk_num}: {output_file}")
+                    chunk.export(output_file, format="mp3")
+                    files.append(output_file)
+                    audio = audio[chunk_duration_ms:]
+                    chunk_num += 1
+                
+                if len(audio) > 0:
+                    output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.mp3")
+                    logger.info(f"Создание части {chunk_num}: {output_file}")
+                    audio.export(output_file, format="mp3")
+                    files.append(output_file)
+                
+                if files and input_path not in files:
+                    try:
+                        os.remove(input_path)
+                    except:
+                        pass
+                
+                logger.info(f"Разделение завершено, создано {len(files)} файлов")
+                return files
+            except Exception as e:
+                logger.warning(f"pydub не работает: {e}")
+        
+        # Используем ffmpeg для разделения
+        if is_mp3 or input_path.lower().endswith('.wav'):
+            import subprocess
             
-            if duration_ms < chunk_duration_ms:
-                logger.info("Файл короче указанной длительности, разделение не нужно")
+            # Конвертируем в WAV если нужно
+            if is_mp3:
+                temp_wav = os.path.join(output_dir, f"{prefix}_temp.wav")
+                try:
+                    subprocess.run(['ffmpeg', '-y', '-i', input_path, '-acodec', 'pcm_s16le', '-ar', '48000', temp_wav], 
+                                  capture_output=True, check=True)
+                    input_wav = temp_wav
+                except Exception as e:
+                    logger.error(f"Конвертация в WAV не удалась: {e}")
+                    return [input_path]
+            else:
+                input_wav = input_path
+            
+            # Читаем WAV и получаем длительность
+            import wave
+            with wave.open(input_wav, 'rb') as wav:
+                rate = wav.getframerate()
+                frames = wav.getnframes()
+                duration_sec = frames / rate
+            
+            logger.info(f"Длительность: {duration_sec:.1f} сек ({duration_sec/60:.1f} мин)")
+            
+            if duration_sec < duration_minutes * 60:
+                logger.info("Файл короче указанной длительности")
+                if is_mp3 and 'temp_wav' in dir():
+                    try:
+                        os.remove(temp_wav)
+                    except:
+                        pass
                 return [input_path]
             
+            # Разделяем через ffmpeg
             files = []
             chunk_num = 1
+            start_sec = 0
             
-            while len(audio) > chunk_duration_ms:
-                chunk = audio[:chunk_duration_ms]
-                output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.mp3")
+            while start_sec < duration_sec:
+                end_sec = min(start_sec + duration_minutes * 60, duration_sec)
+                output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.wav")
                 logger.info(f"Создание части {chunk_num}: {output_file}")
-                chunk.export(output_file, format="mp3")
-                files.append(output_file)
-                audio = audio[chunk_duration_ms:]
+                
+                try:
+                    subprocess.run([
+                        'ffmpeg', '-y', '-i', input_wav,
+                        '-ss', str(start_sec), '-to', str(end_sec),
+                        '-acodec', 'pcm_s16le', '-ar', '48000', output_file
+                    ], capture_output=True, check=True)
+                    files.append(output_file)
+                except Exception as e:
+                    logger.error(f"Ошибка создания части {chunk_num}: {e}")
+                
+                start_sec = end_sec
                 chunk_num += 1
             
-            if len(audio) > 0:
-                output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.mp3")
-                logger.info(f"Создание части {chunk_num}: {output_file}")
-                audio.export(output_file, format="mp3")
-                files.append(output_file)
+            # Удаляем временный WAV
+            if is_mp3 and 'temp_wav' in dir():
+                try:
+                    os.remove(temp_wav)
+                except:
+                    pass
             
-            if files:
+            if files and input_path not in files:
                 try:
                     os.remove(input_path)
                 except:
@@ -291,34 +371,37 @@ def split_audio(input_path, output_dir, prefix, duration_minutes):
             
             logger.info(f"Разделение завершено, создано {len(files)} файлов")
             return files
-        else:
-            import soundfile as sf
-            import numpy as np
-            data, sr = sf.read(input_path)
-            duration_sec = len(data) / sr
-            chunk_samples = int(sr * duration_minutes * 60)
-            
-            if duration_sec < duration_minutes * 60:
-                return [input_path]
-            
-            files = []
-            chunk_num = 1
-            
-            for i in range(0, len(data), chunk_samples):
-                chunk = data[i:i + chunk_samples]
-                output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.wav")
-                logger.info(f"Создание части {chunk_num}: {output_file}")
-                sf.write(output_file, chunk, sr)
-                files.append(output_file)
-                chunk_num += 1
-            
-            if files:
-                try:
-                    os.remove(input_path)
-                except:
-                    pass
-            
-            return files
+        
+        # Для других форматов используем soundfile
+        import soundfile as sf
+        data, sr = sf.read(input_path)
+        duration_sec = len(data) / sr
+        
+        logger.info(f"Длительность: {duration_sec:.1f} сек ({duration_sec/60:.1f} мин)")
+        
+        if duration_sec < duration_minutes * 60:
+            return [input_path]
+        
+        chunk_samples = int(sr * duration_minutes * 60)
+        files = []
+        chunk_num = 1
+        
+        for i in range(0, len(data), chunk_samples):
+            chunk = data[i:i + chunk_samples]
+            output_file = os.path.join(output_dir, f"{prefix}_part{chunk_num}.wav")
+            logger.info(f"Создание части {chunk_num}: {output_file}")
+            sf.write(output_file, chunk, sr)
+            files.append(output_file)
+            chunk_num += 1
+        
+        if files and input_path not in files:
+            try:
+                os.remove(input_path)
+            except:
+                pass
+        
+        logger.info(f"Разделение завершено, создано {len(files)} файлов")
+        return files
     except Exception as e:
         logger.error(f"Ошибка разделения: {e}")
         return [input_path]
@@ -436,6 +519,9 @@ def process_file(input_path, output_dir, voice, split_duration, silent=False, pr
     Параметры:
         tts_type: тип TTS движка ("edge" - Edge TTS, "silero" - локальная модель Silero)
     """
+    # Создаем выходную директорию если не существует
+    os.makedirs(output_dir, exist_ok=True)
+    
     logger.info(f"=== НАЧАЛО ОБРАБОТКИ ФАЙЛА ===")
     logger.info(f"Входной файл: {input_path}")
     logger.info(f"Выходная папка: {output_dir}")
@@ -551,26 +637,19 @@ def process_file(input_path, output_dir, voice, split_duration, silent=False, pr
         logger.error("Нет файлов для объединения!")
         raise Exception("Нет файлов для объединения")
     
-    # Удаляем временные файлы
-    for f in existing_files:
-        try:
-            os.remove(f)
-        except:
-            pass
-    
-    logger.info(f"Объединено в {combined_path}")
-    
     # Теперь разбиваем на куски если нужно
     if split_duration > 0:
         logger.info("=== РАЗДЕЛЕНИЕ НА КУСКИ ===")
         
         try:
-            # Проверяем длительность
-            import wave
-            with wave.open(combined_path, 'rb') as wav:
-                frames = wav.getnframes()
-                rate = wav.getframerate()
-                duration_sec = frames / rate
+            # Проверяем длительность через pydub (поддерживает MP3)
+            if PYDUB_AVAILABLE:
+                audio = AudioSegment.from_file(combined_path)
+                duration_sec = len(audio) / 1000
+            else:
+                import soundfile as sf
+                data, sr = sf.read(combined_path)
+                duration_sec = len(data) / sr
             
             logger.info(f"Длительность: {duration_sec:.1f} сек ({duration_sec/60:.1f} мин)")
             
@@ -582,19 +661,13 @@ def process_file(input_path, output_dir, voice, split_duration, silent=False, pr
                 # Файл короче - конвертируем в MP3 если WAV
                 final_name = os.path.join(output_dir, f"{filename}.mp3")
                 if combined_path.lower().endswith('.wav'):
-                    # Конвертируем WAV в MP3
                     if PYDUB_AVAILABLE:
                         audio = AudioSegment.from_wav(combined_path)
                         audio.export(final_name, format="mp3")
+                        os.remove(combined_path)
                     else:
-                        # soundfile -> pydub не нужен
                         import soundfile as sf
-                        import numpy as np
                         data, sr = sf.read(combined_path)
-                        # Конвертируем numpy в AudioSegment
-                        import io
-                        import struct
-                        # Сохраняем как WAV, потом конвертируем
                         sf.write(final_name.replace('.mp3', '.wav'), data, sr)
                         if PYDUB_AVAILABLE:
                             audio = AudioSegment.from_wav(final_name.replace('.mp3', '.wav'))
@@ -628,6 +701,14 @@ def process_file(input_path, output_dir, voice, split_duration, silent=False, pr
             except:
                 shutil.move(combined_path, final_name)
                 result_files = [final_name]
+    
+    # Удаляем временные файлы после завершения
+    for f in existing_files:
+        if f != combined_path:
+            try:
+                os.remove(f)
+            except:
+                pass
     
     if not silent:
         for f in result_files:

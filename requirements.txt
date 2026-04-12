@@ -1,0 +1,14 @@
+edge-tts>=6.1.0
+gtts>=2.3.0
+pyttsx3>=2.90
+PyPDF2>=3.0.0
+ebooklib>=0.18
+python-telegram-bot>=20.0
+pydub>=0.25.1
+mutagen>=1.47.0
+PyQt6>=6.0.0
+silero>=0.5.0
+torch>=2.0.0
+torchaudio>=2.0.0
+scipy>=1.10.0
+soundfile>=0.13.0

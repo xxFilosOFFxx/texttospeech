@@ -531,23 +531,13 @@ def process_file(input_path, output_dir, voice, split_duration, silent=False, pr
         logger.info("=== РАЗДЕЛЕНИЕ НА КУСКИ ===")
         
         try:
-            # Определяем формат и конвертируем если нужно
-            is_combined_wav = combined_path.lower().endswith('.wav')
+            # Проверяем длительность
+            import wave
+            with wave.open(combined_path, 'rb') as wav:
+                frames = wav.getnframes()
+                rate = wav.getframerate()
+                duration_sec = frames / rate
             
-            # Конвертируем в MP3 если это не MP3
-            if not is_combined_wav or not combined_path.lower().endswith('.mp3'):
-                if PYDUB_AVAILABLE and is_combined_wav:
-                    # WAV -> MP3
-                    logger.info("Конвертация WAV в MP3...")
-                    audio = AudioSegment.from_wav(combined_path)
-                    final_mp3 = os.path.join(tempfile.gettempdir(), f"{filename}_combined.mp3")
-                    audio.export(final_mp3, format="mp3")
-                    os.remove(combined_path)
-                    combined_path = final_mp3
-            
-            # Проверяем длительность через pydub
-            audio = AudioSegment.from_file(combined_path)
-            duration_sec = len(audio) / 1000.0
             logger.info(f"Длительность: {duration_sec:.1f} сек ({duration_sec/60:.1f} мин)")
             
             max_duration_sec = split_duration * 60
@@ -555,17 +545,31 @@ def process_file(input_path, output_dir, voice, split_duration, silent=False, pr
                 logger.info(f"Разбиваем на куски по {split_duration} минут...")
                 result_files = split_audio(combined_path, output_dir, filename, split_duration)
             else:
-                # Файл короче - просто перемещаем с правильным расширением
+                # Файл короче - конвертируем в MP3 если WAV
                 final_name = os.path.join(output_dir, f"{filename}.mp3")
-                # Если уже mp3
-                if combined_path.lower().endswith('.mp3'):
-                    shutil.move(combined_path, final_name)
+                if combined_path.lower().endswith('.wav'):
+                    # Конвертируем WAV в MP3
+                    if PYDUB_AVAILABLE:
+                        audio = AudioSegment.from_wav(combined_path)
+                        audio.export(final_name, format="mp3")
+                    else:
+                        # soundfile -> pydub не нужен
+                        import soundfile as sf
+                        import numpy as np
+                        data, sr = sf.read(combined_path)
+                        # Конвертируем numpy в AudioSegment
+                        import io
+                        import struct
+                        # Сохраняем как WAV, потом конвертируем
+                        sf.write(final_name.replace('.mp3', '.wav'), data, sr)
+                        if PYDUB_AVAILABLE:
+                            audio = AudioSegment.from_wav(final_name.replace('.mp3', '.wav'))
+                            audio.export(final_name, format="mp3")
+                        else:
+                            shutil.move(combined_path, final_name)
                 else:
-                    # Конвертируем
-                    audio.export(final_name, format="mp3")
-                    os.remove(combined_path)
+                    shutil.move(combined_path, final_name)
                 result_files = [final_name]
-                
         except Exception as e:
             logger.error(f"Ошибка разбиения: {e}, перемещаем как есть")
             final_name = os.path.join(output_dir, f"{filename}.mp3")
@@ -582,17 +586,14 @@ def process_file(input_path, output_dir, voice, split_duration, silent=False, pr
             result_files = [final_name]
         else:
             try:
+                from pydub import AudioSegment
                 audio = AudioSegment.from_file(combined_path)
                 audio.export(final_name, format="mp3")
                 os.remove(combined_path)
                 result_files = [final_name]
-            except Exception as e:
-                logger.error(f"Ошибка конвертации: {e}")
+            except:
                 shutil.move(combined_path, final_name)
                 result_files = [final_name]
-    
-    logger.info(f"=== ОБРАБОТКА ЗАВЕРШЕНА ===")
-    logger.info(f"Итого создано файлов: {len(result_files)}")
     
     if not silent:
         for f in result_files:

@@ -58,7 +58,7 @@ python tts_converter.py -i "book.txt" -o "output/" --tts silero --voice "xenia"
 ### Telegram бот
 
 ```bash
-python tts_converter.py --bot "YOUR_BOT_TOKEN"
+python bot.py "YOUR_BOT_TOKEN"
 ```
 
 #### Алгоритм работы бота:
@@ -75,17 +75,18 @@ python tts_converter.py --bot "YOUR_BOT_TOKEN"
 ### Запуск как systemd сервис
 
 ```bash
-# Копируем сервис файл
+# Скопируйте tts.service
 sudo cp tts.service /etc/systemd/system/
 
-# Редактируем токен
+# Отредактируйте токен
 sudo nano /etc/systemd/system/tts.service
+# Замените YOUR_BOT_TOKEN на ваш токен в строке ExecStart
 
-# Запускаем
+# Запустите
 sudo systemctl enable tts
 sudo systemctl start tts
 
-# Проверяем статус
+# Проверьте статус
 sudo systemctl status tts
 
 # Логи
@@ -102,7 +103,6 @@ journalctl -u tts -f
 | `-s`, `--split` | Разделение (минуты) | 0 |
 | `-t`, `--tts` | edge/silero | edge |
 | `-g`, `--gui` | Запустить GUI | - |
-| `-b`, `--bot` | Токен Telegram бота | - |
 
 ## Доступные голоса
 

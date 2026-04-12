@@ -58,9 +58,9 @@ activate_venv() {
 install_python_deps() {
     echo "Установка Python зависимостей..."
     
-    pip install --upgrade pip
+    ./venv/bin/pip install --upgrade pip
     
-    pip install -r requirements.txt
+    ./venv/bin/pip install -r requirements.txt
     
     echo "Python зависимости установлены"
 }

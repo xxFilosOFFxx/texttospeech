@@ -1,0 +1,19 @@
+[Unit]
+Description=Text to Speech Converter Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=sergey
+WorkingDirectory=/home/sergey/projects/texttospeech
+ExecStart=/usr/bin/python3 /home/sergey/projects/texttospeech/tts_converter.py --bot YOUR_BOT_TOKEN
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/sergey/projects/texttospeech/bot.log
+StandardError=append:/home/sergey/projects/texttospeech/bot.log
+
+# Очистка временных файлов при перезагрузке
+ExecStartPost=/bin/bash -c 'rm -rf /tmp/tmp*'
+
+[Install]
+WantedBy=multi-user.target

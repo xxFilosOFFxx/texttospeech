@@ -8,7 +8,8 @@
 - Два движка TTS: Edge TTS (онлайн) и Silero (офлайн)
 - Разделение на главы по N минут
 - GUI (PyQt6/tkinter)
-- Telegram бот
+- Telegram бот с интерактивным выбором параметров
+- Может работать как systemd сервис
 
 ## Установка
 
@@ -54,7 +55,44 @@ python tts_converter.py -i "book.txt" -o "output/" --split 30 --voice "ru-RU-Sve
 python tts_converter.py -i "book.txt" -o "output/" --tts silero --voice "xenia"
 ```
 
-### Аргументы CLI
+### Telegram бот
+
+```bash
+python tts_converter.py --bot "YOUR_BOT_TOKEN"
+```
+
+#### Алгоритм работы бота:
+
+1. Пользователь отправляет файл (TXT, PDF, EPUB, FB2)
+2. Бот проверяет расширение, предупреждает если неверное
+3. Бот спрашивает: "На сколько минут разбить?" (0 = один файл)
+4. Бот предлагает выбрать движок: Edge TTS (1) или Silero (2)
+5. Бот предлагает выбрать голос из списка
+6. Начинается конвертация с ключевыми этапами (не спамит)
+7. После конвертации отправляет аудио файлы ответом
+8. Временные файлы удаляются сразу после отправки
+
+### Запуск как systemd сервис
+
+```bash
+# Копируем сервис файл
+sudo cp tts.service /etc/systemd/system/
+
+# Редактируем токен
+sudo nano /etc/systemd/system/tts.service
+
+# Запускаем
+sudo systemctl enable tts
+sudo systemctl start tts
+
+# Проверяем статус
+sudo systemctl status tts
+
+# Логи
+journalctl -u tts -f
+```
+
+## Аргументы CLI
 
 | Аргумент | Описание | По умолчанию |
 |---------|----------|-------------|
@@ -66,7 +104,7 @@ python tts_converter.py -i "book.txt" -o "output/" --tts silero --voice "xenia"
 | `-g`, `--gui` | Запустить GUI | - |
 | `-b`, `--bot` | Токен Telegram бота | - |
 
-### Доступные голоса
+## Доступные голоса
 
 **Edge TTS:**
 - Русские: ru-RU-SvetlanaNeural, ru-RU-DmitryNeural, ru-RU-ElizabethNeural
@@ -74,7 +112,7 @@ python tts_converter.py -i "book.txt" -o "output/" --tts silero --voice "xenia"
 - Украинские: UK-RomanNeural, UK-LydiaNeural
 
 **Silero:**
-- xenia, aidar, aleksandr, alyona, anna, danil, dasha, emma, iren, max, oksana, pavel
+- xenia, aidar, aleksandr, alyona, anna, danil, dasha, max, pavel
 
 ## Устранение проблем
 

@@ -22,8 +22,8 @@ install_system_deps() {
         # Fedora
         sudo dnf install -y python3 python3-pip ffmpeg
     elif command -v pacman &> /dev/null; then
-        # Arch Linux
-        sudo pacman -S python python-pip ffmpeg
+        # Arch Linux / Manjaro
+        sudo pacman -S --noconfirm python python-pip ffmpeg
     elif command -v brew &> /dev/null; then
         # macOS
         brew install python3 ffmpeg
@@ -61,9 +61,6 @@ install_python_deps() {
     pip install --upgrade pip
     
     pip install -r requirements.txt
-    
-    # Установка дополнительных зависимостей (не в requirements.txt)
-    pip install scipy soundfile
     
     echo "Python зависимости установлены"
 }

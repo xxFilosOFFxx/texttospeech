@@ -7,7 +7,6 @@ Telegram Bot запускатель.
 import sys
 import os
 import subprocess
-import asyncio
 
 # Автоматическая активация виртуального окружения (до импортов)
 venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
@@ -250,13 +249,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session.waiting_for = None
             user_sessions[user_id] = UserSession(user_id)
             
-            # Запускаем конвертацию как фоновую задачу чтобы не блокировать других пользователей
-            asyncio.create_task(process_and_send(update, session_data))
+            # Запускаем конвертацию в отдельном потоке чтобы не блокировать event loop бота
+            import threading
+            t = threading.Thread(target=_run_conversion_blocking, args=(update, session_data), daemon=True)
+            t.start()
             
     except Exception as e:
         logger.error(f"Ошибка в handle_text: {e}")
         await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
         session.waiting_for = None
+
+def _run_conversion_blocking(update, session_data):
+    """
+    Запускает конвертацию в отдельном потоке с собственным event loop.
+    """
+    import asyncio
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(process_and_send(update, session_data))
+    except Exception as e:
+        logger.error(f"Ошибка конвертации в потоке: {e}")
+    finally:
+        loop.close()
 
 async def process_and_send(update: Update, session_data: dict):
     """
@@ -410,14 +425,15 @@ def main():
     
     # HTTP запрос с увеличенными таймаутами
     request = HTTPXRequest(
-        connection_pool_size=16,
-        connect_timeout=60.0,
-        read_timeout=60.0,
-        write_timeout=60.0,
-        pool_timeout=60.0
+        connection_pool_size=8,
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0
     )
     
     application = Application.builder().token(args.token).request(request).build()
+    
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))

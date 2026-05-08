@@ -39,16 +39,15 @@ import numpy as np
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    stream=sys.stdout  # Лог в stdout чтобы не путать с ошибками
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
-# Перенаправляем все логи в stdout (включая библиотеки)
-for name in logging.root.manager.loggerDict:
-    log = logging.getLogger(name)
-    for handler in log.handlers[:]:
-        if isinstance(handler, logging.StreamHandler):
-            handler.stream = sys.stdout
+# Подавляем слишком подробные логи httpx и telegram
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.INFO)
 
 # Константы
 SUPPORTED_EXTENSIONS = ['txt', 'pdf', 'epub', 'fb2']
@@ -409,13 +408,13 @@ def main():
     
     from telegram.request import HTTPXRequest
     
-    # HTTP запрос с повторными попытками при таймаутах
+    # HTTP запрос с увеличенными таймаутами
     request = HTTPXRequest(
         connection_pool_size=16,
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-        pool_timeout=30.0
+        connect_timeout=60.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=60.0
     )
     
     application = Application.builder().token(args.token).request(request).build()
@@ -426,8 +425,14 @@ def main():
     
     print("Telegram бот запущен...")
     
-    # run_polling синхронный и сам управляет event loop
-    application.run_polling()
+    # run_polling с увеличенным числом попыток подключения при старте
+    application.run_polling(bootstrap_retries=10)
 
 if __name__ == "__main__":
-    main()
+    import time
+    while True:
+        try:
+            main()
+        except Exception as e:
+            logger.error(f"Бот упал: {e}, перезапуск через 30с...")
+            time.sleep(30)

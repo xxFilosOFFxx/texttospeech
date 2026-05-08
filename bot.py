@@ -4,7 +4,6 @@ Telegram Bot запускатель.
 Запускает бота в отдельном процессе.
 """
 
-import asyncio
 import sys
 import os
 

@@ -69,16 +69,17 @@ def get_session(user_id):
         user_sessions[user_id] = UserSession(user_id)
     return user_sessions[user_id]
 
-async def retry_api_call(coro, max_retries=3, delay=2):
+async def retry_api_call(coro_fn, max_retries=3, delay=2):
     """
     Выполняет API вызов с повторными попытками при таймаутах.
+    coro_fn — вызываемая функция возвращающая корутину (lambda: ...)
     """
     import asyncio
     from telegram.error import TimedOut, NetworkError
     
     for attempt in range(max_retries):
         try:
-            return await coro
+            return await coro_fn()
         except (TimedOut, NetworkError) as e:
             if attempt < max_retries - 1:
                 wait = delay * (attempt + 1)
@@ -92,7 +93,7 @@ async def safe_reply_text(message, text, **kwargs):
     """
     Безопасная отправка текстового сообщения с повторными попытками.
     """
-    await retry_api_call(message.reply_text(text, **kwargs))
+    await retry_api_call(lambda: message.reply_text(text, **kwargs))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply_text(update.message,
@@ -115,7 +116,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(user_id)
     
     try:
-        file = await retry_api_call(update.message.document.get_file())
+        file = await retry_api_call(update.message.document.get_file)
         ext = update.message.document.file_name.split('.')[-1].lower()
         file_name = update.message.document.file_name
         
@@ -256,7 +257,7 @@ async def process_and_send(update: Update, session):
         ext = ".wav" if session.tts_type == "silero" else ".mp3"
         temp_files = [os.path.join(temp_dir, f"part{i}{ext}") for i in range(num_chunks)]
         
-        progress_msg = await retry_api_call(update.message.reply_text(
+        progress_msg = await retry_api_call(lambda: update.message.reply_text(
             f"🎙 Конвертирую...\n0/{num_chunks} частей",
             parse_mode="HTML"
         ))
@@ -271,7 +272,7 @@ async def process_and_send(update: Update, session):
                 if current > last_update and current % 10 == 0:
                     last_update = current
                     try:
-                        await retry_api_call(progress_msg.edit_text(
+                        await retry_api_call(lambda: progress_msg.edit_text(
                             f"🎙 Конвертирую...\n{current}/{num_chunks} частей",
                             parse_mode="HTML"
                         ))
@@ -280,7 +281,7 @@ async def process_and_send(update: Update, session):
             
             await convert_all_chunks_async(chunks, temp_files, session.voice, progress_callback, "+0%")
         
-        await retry_api_call(progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML"))
+        await retry_api_call(lambda: progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML"))
         
         # Объединение и отправка
         existing_files = [f for f in temp_files if os.path.exists(f)]
@@ -352,8 +353,9 @@ async def process_and_send(update: Update, session):
         for f in final_files:
             try:
                 with open(f, "rb") as file:
-                    await retry_api_call(update.message.reply_document(
-                        document=file,
+                    doc_data = file.read()
+                    await retry_api_call(lambda: update.message.reply_document(
+                        document=doc_data,
                         filename=os.path.basename(f),
                         caption=f"🎵 {os.path.basename(f)}"
                     ))

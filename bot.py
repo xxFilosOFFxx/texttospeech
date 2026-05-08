@@ -69,8 +69,33 @@ def get_session(user_id):
         user_sessions[user_id] = UserSession(user_id)
     return user_sessions[user_id]
 
+async def retry_api_call(coro, max_retries=3, delay=2):
+    """
+    Выполняет API вызов с повторными попытками при таймаутах.
+    """
+    import asyncio
+    from telegram.error import TimedOut, NetworkError
+    
+    for attempt in range(max_retries):
+        try:
+            return await coro
+        except (TimedOut, NetworkError) as e:
+            if attempt < max_retries - 1:
+                wait = delay * (attempt + 1)
+                logger.warning(f"Таймаут API (попытка {attempt + 1}/{max_retries}): {e}, ожидание {wait}с")
+                await asyncio.sleep(wait)
+            else:
+                logger.error(f"Все {max_retries} попыток API неудачны: {e}")
+                raise
+
+async def safe_reply_text(message, text, **kwargs):
+    """
+    Безопасная отправка текстового сообщения с повторными попытками.
+    """
+    await retry_api_call(message.reply_text(text, **kwargs))
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await safe_reply_text(update.message,
         "🎙 <b>Text to Speech Converter</b>\n\n"
         "Отправьте мне текстовый файл (TXT, PDF, EPUB, FB2) - я конвертирую его в MP3 аудио.\n\n"
         "После отправки файла я задам несколько вопросов о параметрах конвертации.",
@@ -78,7 +103,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await safe_reply_text(update.message,
         "📖 <b>Помощь</b>\n\n"
         "Отправьте текстовый файл для конвертации.\n"
         "Команды: /start - начать, /help - помощь",
@@ -90,12 +115,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(user_id)
     
     try:
-        file = await update.message.document.get_file()
+        file = await retry_api_call(update.message.document.get_file())
         ext = update.message.document.file_name.split('.')[-1].lower()
         file_name = update.message.document.file_name
         
         if ext not in SUPPORTED_EXTENSIONS:
-            await update.message.reply_text(
+            await safe_reply_text(update.message,
                 f"❌ <b>Неверный формат файла!</b>\n\n"
                 f"Поддерживаемые форматы: <code>{', '.join(SUPPORTED_EXTENSIONS)}</code>\n\n"
                 f"Вы отправили: <code>.{ext}</code>",
@@ -108,7 +133,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.file_path = os.path.join(temp_dir, file_name)
         await file.download_to_drive(session.file_path)
         
-        await update.message.reply_text(
+        await safe_reply_text(update.message,
             f"✅ <b>Файл получен!</b>\n\n"
             f"📄 <code>{file_name}</code>\n\n"
             f"<b>Шаг 1 из 3</b>\n"
@@ -121,7 +146,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Ошибка при обработке документа: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
         if session.file_path and os.path.exists(os.path.dirname(session.file_path)):
             try:
                 shutil.rmtree(os.path.dirname(session.file_path))
@@ -135,7 +160,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
     if not session.waiting_for or not session.file_path:
-        await update.message.reply_text("Отправьте файл для конвертации или /start для начала.")
+        await safe_reply_text(update.message, "Отправьте файл для конвертации или /start для начала.")
         return
     
     try:
@@ -143,15 +168,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 split_val = int(text)
                 if split_val < 0:
-                    await update.message.reply_text("❌ Число должно быть положительным.")
+                    await safe_reply_text(update.message, "❌ Число должно быть положительным.")
                     return
                 session.split_duration = split_val
             except ValueError:
-                await update.message.reply_text("❌ Введите число. Например: 30")
+                await safe_reply_text(update.message, "❌ Введите число. Например: 30")
                 return
             
             split_text = "одним файлом" if split_val == 0 else f"по {split_val} минут"
-            await update.message.reply_text(
+            await safe_reply_text(update.message,
                 f"✅ Разбиение: <b>{split_text}</b>\n\n"
                 f"<b>Шаг 2 из 3</b>\n"
                 f"Выберите движок TTS:\n"
@@ -168,19 +193,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 session.available_voices = EDGE_VOICES
             elif text == "2":
                 if not SILERO_AVAILABLE:
-                    await update.message.reply_text("❌ Silero не установлен. Использую Edge TTS.")
+                    await safe_reply_text(update.message, "❌ Silero не установлен. Использую Edge TTS.")
                     session.tts_type = "edge"
                     session.available_voices = EDGE_VOICES
                 else:
                     session.tts_type = "silero"
                     session.available_voices = SILERO_VOICES
             else:
-                await update.message.reply_text("Введите 1 или 2")
+                await safe_reply_text(update.message, "Введите 1 или 2")
                 return
             
             voice_list = "\n".join([f"<code>{i + 1}</code> - {v}" for i, v in enumerate(session.available_voices)])
             engine_name = "Edge TTS" if session.tts_type == "edge" else "Silero"
-            await update.message.reply_text(
+            await safe_reply_text(update.message,
                 f"✅ Движок: <b>{engine_name}</b>\n\n"
                 f"<b>Шаг 3 из 3</b>\n"
                 f"Выберите голос (отправьте номер):\n\n{voice_list}",
@@ -192,14 +217,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 voice_idx = int(text) - 1
                 if voice_idx < 0 or voice_idx >= len(session.available_voices):
-                    await update.message.reply_text(f"❌ Номер должен быть от 1 до {len(session.available_voices)}")
+                    await safe_reply_text(update.message, f"❌ Номер должен быть от 1 до {len(session.available_voices)}")
                     return
                 session.voice = session.available_voices[voice_idx]
             except ValueError:
-                await update.message.reply_text("❌ Введите номер голоса")
+                await safe_reply_text(update.message, "❌ Введите номер голоса")
                 return
             
-            await update.message.reply_text(
+            await safe_reply_text(update.message,
                 f"✅ Голос: <b>{session.voice}</b>\n\n"
                 f"🚀 <b>Начинаю конвертацию...</b>",
                 parse_mode="HTML"
@@ -210,20 +235,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"Ошибка в handle_text: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
         session.waiting_for = None
 
 async def process_and_send(update: Update, session):
     user_id = update.effective_user.id
     
     try:
-        await update.message.reply_text("📖 Извлекаю текст из файла...")
+        await safe_reply_text(update.message, "📖 Извлекаю текст из файла...")
         text = extract_text_from_file(session.file_path)
         if not text.strip():
-            await update.message.reply_text("❌ Не удалось извлечь текст из файла.")
+            await safe_reply_text(update.message, "❌ Не удалось извлечь текст из файла.")
             return
         
-        await update.message.reply_text("✂️ Разбиваю текст на части...")
+        await safe_reply_text(update.message, "✂️ Разбиваю текст на части...")
         chunks = split_text_into_chunks(text, tts_type=session.tts_type)
         num_chunks = len(chunks)
         
@@ -231,10 +256,10 @@ async def process_and_send(update: Update, session):
         ext = ".wav" if session.tts_type == "silero" else ".mp3"
         temp_files = [os.path.join(temp_dir, f"part{i}{ext}") for i in range(num_chunks)]
         
-        progress_msg = await update.message.reply_text(
+        progress_msg = await retry_api_call(update.message.reply_text(
             f"🎙 Конвертирую...\n0/{num_chunks} частей",
             parse_mode="HTML"
-        )
+        ))
         
         if session.tts_type == "silero":
             convert_all_chunks_silero(chunks, temp_files, session.voice)
@@ -246,22 +271,22 @@ async def process_and_send(update: Update, session):
                 if current > last_update and current % 10 == 0:
                     last_update = current
                     try:
-                        await progress_msg.edit_text(
+                        await retry_api_call(progress_msg.edit_text(
                             f"🎙 Конвертирую...\n{current}/{num_chunks} частей",
                             parse_mode="HTML"
-                        )
+                        ))
                     except:
                         pass
             
             await convert_all_chunks_async(chunks, temp_files, session.voice, progress_callback, "+0%")
         
-        await progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML")
+        await retry_api_call(progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML"))
         
         # Объединение и отправка
         existing_files = [f for f in temp_files if os.path.exists(f)]
         
         if not existing_files:
-            await update.message.reply_text("❌ Ошибка: не создано ни одного файла.")
+            await safe_reply_text(update.message, "❌ Ошибка: не создано ни одного файла.")
             return
         
         # Читаем все WAV/MP3 и объединяем
@@ -282,14 +307,14 @@ async def process_and_send(update: Update, session):
         
         combined_audio = np.concatenate(audios)
         duration_sec = len(combined_audio) / sr
-        await update.message.reply_text(f"📊 Длительность: {duration_sec/60:.1f} мин", parse_mode="HTML")
+        await safe_reply_text(update.message, f"📊 Длительность: {duration_sec/60:.1f} мин", parse_mode="HTML")
         
         # Определяем как делить
         max_duration_sec = session.split_duration * 60 if session.split_duration > 0 else float('inf')
         final_files = []
         
         if duration_sec > max_duration_sec:
-            await update.message.reply_text(f"✂️ Разбиваю на куски по {session.split_duration} минут...", parse_mode="HTML")
+            await safe_reply_text(update.message, f"✂️ Разбиваю на куски по {session.split_duration} минут...", parse_mode="HTML")
             samples_per_chunk = int(sr * session.split_duration * 60)
             chunk_num = 1
             
@@ -307,7 +332,7 @@ async def process_and_send(update: Update, session):
                 if os.path.getsize(mp3_path) < 48 * 1024 * 1024:  # Telegram limit ~48MB
                     final_files.append(mp3_path)
                 else:
-                    await update.message.reply_text(f"⚠️ Часть {chunk_num} слишком большая, пропускаю")
+                    await safe_reply_text(update.message, f"⚠️ Часть {chunk_num} слишком большая, пропускаю")
                     os.remove(mp3_path)
                 
                 chunk_num += 1
@@ -322,25 +347,25 @@ async def process_and_send(update: Update, session):
             final_files.append(mp3_path)
         
         # Отправка файлов
-        await update.message.reply_text(f"📤 Отправляю {len(final_files)} файлов...", parse_mode="HTML")
+        await safe_reply_text(update.message, f"📤 Отправляю {len(final_files)} файлов...", parse_mode="HTML")
         
         for f in final_files:
             try:
                 with open(f, "rb") as file:
-                    await update.message.reply_document(
+                    await retry_api_call(update.message.reply_document(
                         document=file,
                         filename=os.path.basename(f),
                         caption=f"🎵 {os.path.basename(f)}"
-                    )
+                    ))
             except Exception as e:
                 logger.error(f"Ошибка отправки {f}: {e}")
-                await update.message.reply_text(f"⚠️ Не удалось отправить {os.path.basename(f)}: {str(e)}")
+                await safe_reply_text(update.message, f"⚠️ Не удалось отправить {os.path.basename(f)}: {str(e)}")
         
-        await update.message.reply_text("✅ <b>Готово!</b>", parse_mode="HTML")
+        await safe_reply_text(update.message, "✅ <b>Готово!</b>", parse_mode="HTML")
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
     
     finally:
         if session.file_path and os.path.exists(os.path.dirname(session.file_path)):
@@ -355,7 +380,18 @@ def main():
     parser.add_argument("token", help="Telegram Bot Token")
     args = parser.parse_args()
     
-    application = Application.builder().token(args.token).build()
+    from telegram.request import HTTPXRequest
+    
+    # HTTP запрос с повторными попытками при таймаутах
+    request = HTTPXRequest(
+        connection_pool_size=16,
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0
+    )
+    
+    application = Application.builder().token(args.token).request(request).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))

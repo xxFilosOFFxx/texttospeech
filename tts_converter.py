@@ -436,7 +436,7 @@ def split_text_into_chunks(text, chunk_size=2000, tts_type="edge"):
     return chunks if chunks else [text]
 
 
-async def convert_chunk_to_audio_async(text, output_path, voice, rate="+0%", retry=3, delay=2):
+async def convert_chunk_to_audio_async(text, output_path, voice, rate="+0%", retry=5, delay=3):
     """
     Конвертирует один кусок текста в аудио с повторными попытками при ошибках.
     """
@@ -445,7 +445,11 @@ async def convert_chunk_to_audio_async(text, output_path, voice, rate="+0%", ret
     last_error = None
     for attempt in range(retry):
         try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            communicate = edge_tts.Communicate(
+                text, voice, rate=rate,
+                connect_timeout=30,
+                receive_timeout=120
+            )
             logger.debug(f"Попытка {attempt + 1}/{retry}: сохранение в {output_path}")
             await communicate.save(output_path)
             logger.debug(f"Успешно сохранено в {output_path}")
@@ -454,8 +458,9 @@ async def convert_chunk_to_audio_async(text, output_path, voice, rate="+0%", ret
             last_error = e
             logger.warning(f"Попытка {attempt + 1}/{retry} неудачна: {e}")
             if attempt < retry - 1:
-                logger.info(f"Ожидание {delay * (attempt + 1)} сек перед повторной попыткой...")
-                await asyncio.sleep(delay * (attempt + 1))
+                wait = delay * (attempt + 1)
+                logger.info(f"Ожидание {wait} сек перед повторной попыткой...")
+                await asyncio.sleep(wait)
     
     logger.error(f"Не удалось сконвертировать часть после {retry} попыток: {last_error}")
     return False
@@ -483,8 +488,8 @@ async def convert_all_chunks_async(chunks, temp_files, voice, progress_callback=
             logger.warning(f"Часть {chunk_idx + 1}/{num_chunks} не сконвертирована, пропускаем")
             return False
     
-    semaphore = asyncio.Semaphore(CPU_COUNT)
-    logger.info(f"Создан семафор с лимитом {CPU_COUNT}")
+    semaphore = asyncio.Semaphore(3)
+    logger.info(f"Создан семафор с лимитом 3 параллельных запросов")
     
     async def bounded_convert(idx, text, path):
         async with semaphore:

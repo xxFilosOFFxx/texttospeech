@@ -34,7 +34,11 @@ import logging
 import soundfile as sf
 import numpy as np
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Лог в stdout чтобы не путать с ошибками
+)
 logger = logging.getLogger(__name__)
 
 # Константы

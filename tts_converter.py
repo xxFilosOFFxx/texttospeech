@@ -1172,7 +1172,7 @@ def pyqt_gui_mode():
             self.is_converting = False  # Флаг конвертации
             self.conversion_thread = None  # Поток конвертации
             self.bot_running = False  # Флаг работы бота
-            self.bot_process = None  # Процесс бота
+            self.bot_process = None  # Процесс бота (QProcess)
             
             # Доступные голоса Edge TTS
             voices = [
@@ -1460,38 +1460,57 @@ def pyqt_gui_mode():
             
             if self.bot_running:
                 self.log("Остановка Telegram бота...")
+                self.bot_process.kill()
+                self.bot_process = None
                 self.bot_running = False
                 self.btn_bot.setText("Запустить")
-                if self.bot_process:
-                    self.bot_process.terminate()
-                    self.bot_process = None
                 self.log("Бот остановлен")
                 return
             
             self.log("Запуск Telegram бота...")
-            self.bot_running = True
-            self.btn_bot.setText("Остановить")
             
-            import subprocess
             venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv', 'bin', 'python')
             bot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.py')
-            self.bot_process = subprocess.Popen(
-                [venv_python, bot_script, token],
-                cwd=os.path.dirname(os.path.abspath(__file__)),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
             
-            import threading
-            def read_output():
-                for line in iter(self.bot_process.stdout.readline, ''):
-                    if not self.bot_running:
-                        break
-                    self.log(line.strip())
+            from PyQt6.QtCore import QProcess
+            self.bot_process = QProcess()
+            self.bot_process.setProgram(venv_python)
+            self.bot_process.setArguments([bot_script, token])
+            self.bot_process.setWorkingDirectory(os.path.dirname(os.path.abspath(__file__)))
             
-            threading.Thread(target=read_output, daemon=True).start()
-            self.log("Бот запущен в отдельном процессе")
+            self.bot_process.readyReadStandardOutput.connect(self._read_bot_output)
+            self.bot_process.readyReadStandardError.connect(self._read_bot_error)
+            self.bot_process.finished.connect(self._bot_finished)
+            
+            self.bot_process.start()
+            
+            if self.bot_process.state() == QProcess.ProcessState.Running:
+                self.bot_running = True
+                self.btn_bot.setText("Остановить")
+                self.log("Бот запущен!")
+            else:
+                self.log("Ошибка запуска бота")
+        
+        def _read_bot_output(self):
+            try:
+                output = self.bot_process.readAllStandardOutput().data().decode('utf-8', errors='replace')
+                for line in output.splitlines():
+                    self.log(line)
+            except:
+                pass
+        
+        def _read_bot_error(self):
+            try:
+                output = self.bot_process.readAllStandardError().data().decode('utf-8', errors='replace')
+                for line in output.splitlines():
+                    self.log(f"[ERR] {line}")
+            except:
+                pass
+        
+        def _bot_finished(self, exit_code, exit_status):
+            self.bot_running = False
+            self.btn_bot.setText("Запустить")
+            self.log(f"Бот остановлен (код {exit_code})")
 
     app = QApplication(sys.argv)
     window = TextToSpeechApp()

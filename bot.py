@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Telegram Bot запускатель.
-Запускает бота в отдельном процессе.
+Telegram Bot — полностью изолированная архитектура.
+Конвертация запускается как отдельный процесс, бот только общается с пользователями.
 """
 
 import sys
 import os
 import subprocess
+import asyncio
+import tempfile
+import shutil
+import time
+import threading
 
-# Автоматическая активация виртуального окружения (до импортов)
+# Автоматическая активация виртуального окружения
 venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
 if os.path.exists(venv_path):
     for subdir in ['lib', 'lib64']:
@@ -17,23 +22,11 @@ if os.path.exists(venv_path):
             sys.path.insert(0, site_packages)
             break
 
-# Добавляем путь для импорта
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-import argparse
-import tempfile
-import shutil
-
-from tts_converter import (
-    extract_text_from_file, split_text_into_chunks, 
-    convert_all_chunks_async, convert_all_chunks_silero,
-    PYDUB_AVAILABLE, SILERO_AVAILABLE
-)
 import logging
-import soundfile as sf
-import numpy as np
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,22 +34,17 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
-
-# Подавляем слишком подробные логи httpx и telegram
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
 
-# Константы
-SUPPORTED_EXTENSIONS = ['txt', 'pdf', 'epub', 'fb2']
 EDGE_VOICES = [
     "ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru-RU-ElizabethNeural",
     "en-US-JennyNeural", "en-US-GuyNeural", "UK-RomanNeural", "UK-LydiaNeural"
 ]
 SILERO_VOICES = ["xenia", "aidar", "aleksandr", "alyona", "anna", "danil", "dasha", "max", "pavel"]
 
-# Хранилище сессий
 user_sessions = {}
 
 class UserSession:
@@ -75,34 +63,23 @@ def get_session(user_id):
         user_sessions[user_id] = UserSession(user_id)
     return user_sessions[user_id]
 
-async def retry_api_call(coro_fn, max_retries=3, delay=2):
-    """
-    Выполняет API вызов с повторными попытками при таймаутах.
-    coro_fn — вызываемая функция возвращающая корутину (lambda: ...)
-    """
-    import asyncio
+active_conversions = {}
+
+async def retry_send(message, text, max_retries=2, delay=1, **kwargs):
+    """Быстрая отправка сообщения с минимальными повторами."""
     from telegram.error import TimedOut, NetworkError
-    
     for attempt in range(max_retries):
         try:
-            return await coro_fn()
+            return await message.reply_text(text, **kwargs)
         except (TimedOut, NetworkError) as e:
             if attempt < max_retries - 1:
-                wait = delay * (attempt + 1)
-                logger.warning(f"Таймаут API (попытка {attempt + 1}/{max_retries}): {e}, ожидание {wait}с")
-                await asyncio.sleep(wait)
+                logger.warning(f"Таймаут отправки (попытка {attempt + 1}): {e}")
+                await asyncio.sleep(delay)
             else:
-                logger.error(f"Все {max_retries} попыток API неудачны: {e}")
                 raise
 
-async def safe_reply_text(message, text, **kwargs):
-    """
-    Безопасная отправка текстового сообщения с повторными попытками.
-    """
-    await retry_api_call(lambda: message.reply_text(text, **kwargs))
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_reply_text(update.message,
+    await retry_send(update.message,
         "🎙 <b>Text to Speech Converter</b>\n\n"
         "Отправьте мне текстовый файл (TXT, PDF, EPUB, FB2) - я конвертирую его в MP3 аудио.\n\n"
         "После отправки файла я задам несколько вопросов о параметрах конвертации.",
@@ -110,7 +87,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_reply_text(update.message,
+    await retry_send(update.message,
         "📖 <b>Помощь</b>\n\n"
         "Отправьте текстовый файл для конвертации.\n"
         "Команды: /start - начать, /help - помощь",
@@ -121,16 +98,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session = get_session(user_id)
     
+    if user_id in active_conversions:
+        await retry_send(update.message, "⏳ У вас уже идёт конвертация. Дождитесь завершения.")
+        return
+    
     try:
-        file = await retry_api_call(update.message.document.get_file)
+        file = await update.message.document.get_file()
         ext = update.message.document.file_name.split('.')[-1].lower()
         file_name = update.message.document.file_name
         
-        if ext not in SUPPORTED_EXTENSIONS:
-            await safe_reply_text(update.message,
-                f"❌ <b>Неверный формат файла!</b>\n\n"
-                f"Поддерживаемые форматы: <code>{', '.join(SUPPORTED_EXTENSIONS)}</code>\n\n"
-                f"Вы отправили: <code>.{ext}</code>",
+        if ext not in ['txt', 'pdf', 'epub', 'fb2']:
+            await retry_send(update.message,
+                f"❌ <b>Неверный формат!</b>\n\nПоддерживаемые: <code>txt, pdf, epub, fb2</code>\nВы отправили: <code>.{ext}</code>",
                 parse_mode="HTML"
             )
             return
@@ -140,20 +119,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.file_path = os.path.join(temp_dir, file_name)
         await file.download_to_drive(session.file_path)
         
-        await safe_reply_text(update.message,
-            f"✅ <b>Файл получен!</b>\n\n"
-            f"📄 <code>{file_name}</code>\n\n"
-            f"<b>Шаг 1 из 3</b>\n"
-            f"На сколько минут разбить аудио файл?\n"
-            f"Отправьте число (например: <code>30</code>)\n"
-            f"Если <code>0</code> - весь текст в одном файле.",
+        await retry_send(update.message,
+            f"✅ <b>Файл получен!</b>\n\n📄 <code>{file_name}</code>\n\n"
+            f"<b>Шаг 1 из 3</b>\nНа сколько минут разбить аудио?\n"
+            f"Отправьте число (например: <code>30</code>). Если <code>0</code> - одним файлом.",
             parse_mode="HTML"
         )
         session.waiting_for = "split"
         
     except Exception as e:
         logger.error(f"Ошибка при обработке документа: {e}")
-        await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
+        await retry_send(update.message, f"❌ Ошибка: {str(e)}")
         if session.file_path and os.path.exists(os.path.dirname(session.file_path)):
             try:
                 shutil.rmtree(os.path.dirname(session.file_path))
@@ -167,7 +143,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
     if not session.waiting_for or not session.file_path:
-        await safe_reply_text(update.message, "Отправьте файл для конвертации или /start для начала.")
+        await retry_send(update.message, "Отправьте файл для конвертации или /start для начала.")
         return
     
     try:
@@ -175,20 +151,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 split_val = int(text)
                 if split_val < 0:
-                    await safe_reply_text(update.message, "❌ Число должно быть положительным.")
+                    await retry_send(update.message, "❌ Число должно быть положительным.")
                     return
                 session.split_duration = split_val
             except ValueError:
-                await safe_reply_text(update.message, "❌ Введите число. Например: 30")
+                await retry_send(update.message, "❌ Введите число. Например: 30")
                 return
             
             split_text = "одним файлом" if split_val == 0 else f"по {split_val} минут"
-            await safe_reply_text(update.message,
+            await retry_send(update.message,
                 f"✅ Разбиение: <b>{split_text}</b>\n\n"
-                f"<b>Шаг 2 из 3</b>\n"
-                f"Выберите движок TTS:\n"
-                f"<code>1</code> - Edge TTS (онлайн)\n"
-                f"<code>2</code> - Silero (офлайн)\n\n"
+                f"<b>Шаг 2 из 3</b>\nВыберите движок TTS:\n"
+                f"<code>1</code> - Edge TTS (онлайн)\n<code>2</code> - Silero (офлайн)\n\n"
                 f"Отправьте <code>1</code> или <code>2</code>",
                 parse_mode="HTML"
             )
@@ -199,23 +173,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 session.tts_type = "edge"
                 session.available_voices = EDGE_VOICES
             elif text == "2":
-                if not SILERO_AVAILABLE:
-                    await safe_reply_text(update.message, "❌ Silero не установлен. Использую Edge TTS.")
-                    session.tts_type = "edge"
-                    session.available_voices = EDGE_VOICES
-                else:
-                    session.tts_type = "silero"
-                    session.available_voices = SILERO_VOICES
+                session.tts_type = "edge"
+                session.available_voices = EDGE_VOICES
+                await retry_send(update.message, "❌ Silero не установлен. Использую Edge TTS.")
             else:
-                await safe_reply_text(update.message, "Введите 1 или 2")
+                await retry_send(update.message, "Введите 1 или 2")
                 return
             
             voice_list = "\n".join([f"<code>{i + 1}</code> - {v}" for i, v in enumerate(session.available_voices)])
             engine_name = "Edge TTS" if session.tts_type == "edge" else "Silero"
-            await safe_reply_text(update.message,
+            await retry_send(update.message,
                 f"✅ Движок: <b>{engine_name}</b>\n\n"
-                f"<b>Шаг 3 из 3</b>\n"
-                f"Выберите голос (отправьте номер):\n\n{voice_list}",
+                f"<b>Шаг 3 из 3</b>\nВыберите голос (отправьте номер):\n\n{voice_list}",
                 parse_mode="HTML"
             )
             session.waiting_for = "voice"
@@ -224,197 +193,144 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 voice_idx = int(text) - 1
                 if voice_idx < 0 or voice_idx >= len(session.available_voices):
-                    await safe_reply_text(update.message, f"❌ Номер должен быть от 1 до {len(session.available_voices)}")
+                    await retry_send(update.message, f"❌ Номер от 1 до {len(session.available_voices)}")
                     return
                 session.voice = session.available_voices[voice_idx]
             except ValueError:
-                await safe_reply_text(update.message, "❌ Введите номер голоса")
+                await retry_send(update.message, "❌ Введите номер голоса")
                 return
             
-            await safe_reply_text(update.message,
-                f"✅ Голос: <b>{session.voice}</b>\n\n"
-                f"🚀 <b>Начинаю конвертацию...</b>",
+            await retry_send(update.message,
+                f"✅ Голос: <b>{session.voice}</b>\n\n🚀 <b>Начинаю конвертацию...</b>",
                 parse_mode="HTML"
             )
             
-            # Копируем данные сессии для фоновой задачи
-            session_data = {
-                'file_path': session.file_path,
-                'file_name': session.file_name,
-                'split_duration': session.split_duration,
-                'tts_type': session.tts_type,
-                'voice': session.voice,
-                'temp_dir': os.path.dirname(session.file_path),
-            }
             session.waiting_for = None
+            launch_conversion(update, session)
             user_sessions[user_id] = UserSession(user_id)
-            
-            # Запускаем конвертацию в отдельном потоке чтобы не блокировать event loop бота
-            import threading
-            t = threading.Thread(target=_run_conversion_blocking, args=(update, session_data), daemon=True)
-            t.start()
             
     except Exception as e:
         logger.error(f"Ошибка в handle_text: {e}")
-        await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
+        await retry_send(update.message, f"❌ Ошибка: {str(e)}")
         session.waiting_for = None
 
-def _run_conversion_blocking(update, session_data):
-    """
-    Запускает конвертацию в отдельном потоке с собственным event loop.
-    """
-    import asyncio
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(process_and_send(update, session_data))
-    except Exception as e:
-        logger.error(f"Ошибка конвертации в потоке: {e}")
-    finally:
-        loop.close()
+def launch_conversion(update, session):
+    """Запускает конвертацию как отдельный процесс."""
+    user_id = update.effective_user.id
+    temp_dir = os.path.dirname(session.file_path)
+    
+    active_conversions[user_id] = {
+        'update': update,
+        'session': {
+            'file_path': session.file_path,
+            'file_name': session.file_name,
+            'split_duration': session.split_duration,
+            'tts_type': session.tts_type,
+            'voice': session.voice,
+            'temp_dir': temp_dir,
+        },
+        'process': None,
+    }
+    
+    # Запускаем конвертацию через subprocess
+    venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv', 'bin', 'python')
+    converter = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tts_converter.py')
+    
+    split_arg = str(session.split_duration)
+    voice_arg = session.voice
+    
+    process = subprocess.Popen(
+        [venv_python, converter, '-i', session.file_path, '-o', temp_dir,
+         '-v', voice_arg, '-s', split_arg],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    
+    active_conversions[user_id]['process'] = process
+    
+    def monitor_process():
+        """Ждёт завершения процесса и создаёт файл-флаг."""
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            logger.error(f"Конвертация для user {user_id} завершилась с ошибкой: {stderr.decode()}")
+        
+        # Создаём флаг что процесс завершён
+        flag_file = os.path.join(temp_dir, '.conversion_done')
+        with open(flag_file, 'w') as f:
+            f.write(f"returncode={process.returncode}\n")
+    
+    threading.Thread(target=monitor_process, daemon=True).start()
 
-async def process_and_send(update: Update, session_data: dict):
-    """
-    Обработка и конвертация в фоновой задаче.
-    session_data — dict с параметрами конвертации.
-    """
-    message = update.message
-    
-    try:
-        await safe_reply_text(message, "📖 Извлекаю текст из файла...")
-        text = extract_text_from_file(session_data['file_path'])
-        if not text.strip():
-            await safe_reply_text(message, "❌ Не удалось извлечь текст из файла.")
-            return
+async def conversion_watcher(application):
+    """Фоновая задача — отслеживает завершение конвертаций и отправляет файлы."""
+    while True:
+        await asyncio.sleep(2)
         
-        await safe_reply_text(message, "✂️ Разбиваю текст на части...")
-        chunks = split_text_into_chunks(text, tts_type=session_data['tts_type'])
-        num_chunks = len(chunks)
-        
-        temp_dir = session_data['temp_dir']
-        ext = ".wav" if session_data['tts_type'] == "silero" else ".mp3"
-        temp_files = [os.path.join(temp_dir, f"part{i}{ext}") for i in range(num_chunks)]
-        
-        progress_msg = await retry_api_call(lambda: message.reply_text(
-            f"🎙 Конвертирую...\n0/{num_chunks} частей",
-            parse_mode="HTML"
-        ))
-        
-        if session_data['tts_type'] == "silero":
-            convert_all_chunks_silero(chunks, temp_files, session_data['voice'])
-        else:
-            last_update = 0
-            async def progress_callback(p):
-                nonlocal last_update
-                current = int(p * num_chunks / 100)
-                if current > last_update and current % 10 == 0:
-                    last_update = current
-                    try:
-                        await retry_api_call(lambda: progress_msg.edit_text(
-                            f"🎙 Конвертирую...\n{current}/{num_chunks} частей",
-                            parse_mode="HTML"
-                        ))
-                    except:
-                        pass
+        for user_id in list(active_conversions.keys()):
+            conv = active_conversions[user_id]
+            session_data = conv['session']
+            temp_dir = session_data['temp_dir']
             
-            await convert_all_chunks_async(chunks, temp_files, session_data['voice'], progress_callback, "+0%")
-        
-        await retry_api_call(lambda: progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML"))
-        
-        # Объединение и отправка
-        existing_files = [f for f in temp_files if os.path.exists(f)]
-        
-        if not existing_files:
-            await safe_reply_text(message, "❌ Ошибка: не создано ни одного файла.")
-            return
-        
-        # Читаем все WAV/MP3 и объединяем
-        audios = []
-        sr = 48000
-        for f in existing_files:
-            if f.endswith('.mp3'):
-                # Конвертируем MP3 в WAV через ffmpeg для объединения
-                tmp_wav = f.replace('.mp3', '_tmp.wav')
-                subprocess.run(['ffmpeg', '-y', '-i', f, '-acodec', 'pcm_s16le', '-ar', '48000', tmp_wav],
-                              capture_output=True, check=True)
-                audio_data, sr = sf.read(tmp_wav)
-                audios.append(audio_data)
-                os.remove(tmp_wav)
-            else:
-                audio_data, sr = sf.read(f)
-                audios.append(audio_data)
-        
-        combined_audio = np.concatenate(audios)
-        duration_sec = len(combined_audio) / sr
-        await safe_reply_text(message, f"📊 Длительность: {duration_sec/60:.1f} мин", parse_mode="HTML")
-        
-        # Определяем как делить
-        max_duration_sec = session_data['split_duration'] * 60 if session_data['split_duration'] > 0 else float('inf')
-        final_files = []
-        
-        if duration_sec > max_duration_sec:
-            await safe_reply_text(message, f"✂️ Разбиваю на куски по {session_data['split_duration']} минут...", parse_mode="HTML")
-            samples_per_chunk = int(sr * session_data['split_duration'] * 60)
-            chunk_num = 1
+            flag_file = os.path.join(temp_dir, '.conversion_done')
+            if not os.path.exists(flag_file):
+                continue
             
-            for i in range(0, len(combined_audio), samples_per_chunk):
-                chunk = combined_audio[i:i + samples_per_chunk]
-                wav_path = os.path.join(temp_dir, f"chunk_{chunk_num}.wav")
-                sf.write(wav_path, chunk, sr)
-                
-                # Конвертируем WAV в MP3 через ffmpeg
-                file_name = session_data['file_name']
-                mp3_path = os.path.join(temp_dir, f"{file_name.rsplit('.', 1)[0]}_part{chunk_num}.mp3")
-                subprocess.run(['ffmpeg', '-y', '-i', wav_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path],
-                              capture_output=True, check=True)
-                os.remove(wav_path)
-                
-                if os.path.getsize(mp3_path) < 48 * 1024 * 1024:  # Telegram limit ~48MB
-                    final_files.append(mp3_path)
-                else:
-                    await safe_reply_text(message, f"⚠️ Часть {chunk_num} слишком большая, пропускаю")
-                    os.remove(mp3_path)
-                
-                chunk_num += 1
-        else:
-            # Один файл
-            file_name = session_data['file_name']
-            wav_path = os.path.join(temp_dir, "combined.wav")
-            sf.write(wav_path, combined_audio, sr)
-            mp3_path = os.path.join(temp_dir, f"{file_name.rsplit('.', 1)[0]}.mp3")
-            subprocess.run(['ffmpeg', '-y', '-i', wav_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path],
-                          capture_output=True, check=True)
-            os.remove(wav_path)
-            final_files.append(mp3_path)
-        
-        # Отправка файлов
-        await safe_reply_text(message, f"📤 Отправляю {len(final_files)} файлов...", parse_mode="HTML")
-        
-        for f in final_files:
+            # Конвертация завершена
+            del active_conversions[user_id]
+            
+            update = conv['update']
+            message = update.message
+            
+            # Проверяем успешность
+            with open(flag_file) as f:
+                content = f.read()
+            
+            if 'returncode=0' not in content:
+                await message.reply_text(f"❌ Ошибка конвертации:\n{content}")
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                continue
+            
+            # Находим MP3 файлы (результаты конвертации)
+            mp3_files = [f for f in os.listdir(temp_dir) 
+                        if f.endswith('.mp3') and f != 'preview.mp3']
+            
+            if not mp3_files:
+                await message.reply_text("❌ Не удалось создать аудио файл.")
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                continue
+            
+            # Отправляем файлы
+            for mp3_file in sorted(mp3_files):
+                file_path = os.path.join(temp_dir, mp3_file)
+                try:
+                    with open(file_path, "rb") as f:
+                        await message.reply_document(
+                            document=f,
+                            filename=mp3_file,
+                            caption=f"🎵 {mp3_file}"
+                        )
+                except Exception as e:
+                    logger.error(f"Ошибка отправки {mp3_file}: {e}")
+                    await message.reply_text(f"⚠️ Не удалось отправить {mp3_file}")
+            
+            await message.reply_text("✅ <b>Готово!</b>", parse_mode="HTML")
+            
+            # Очистка
             try:
-                with open(f, "rb") as file:
-                    doc_data = file.read()
-                    await retry_api_call(lambda: message.reply_document(
-                        document=doc_data,
-                        filename=os.path.basename(f),
-                        caption=f"🎵 {os.path.basename(f)}"
-                    ))
-            except Exception as e:
-                logger.error(f"Ошибка отправки {f}: {e}")
-                await safe_reply_text(message, f"⚠️ Не удалось отправить {os.path.basename(f)}: {str(e)}")
-        
-        await safe_reply_text(message, "✅ <b>Готово!</b>", parse_mode="HTML")
-        
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await safe_reply_text(message, f"❌ Ошибка: {str(e)}")
-    
-    finally:
-        if session_data.get('file_path') and os.path.exists(os.path.dirname(session_data['file_path'])):
-            try:
-                shutil.rmtree(os.path.dirname(session_data['file_path']))
+                shutil.rmtree(temp_dir)
             except:
                 pass
+
+async def post_init(application):
+    """Запускает фоновый наблюдатель после инициализации бота."""
+    application.create_task(conversion_watcher(application))
 
 def main():
     parser = argparse.ArgumentParser(description="Telegram Bot")
@@ -423,7 +339,6 @@ def main():
     
     from telegram.request import HTTPXRequest
     
-    # HTTP запрос с увеличенными таймаутами
     request = HTTPXRequest(
         connection_pool_size=8,
         connect_timeout=30.0,
@@ -433,6 +348,7 @@ def main():
     )
     
     application = Application.builder().token(args.token).request(request).build()
+    application.post_init = post_init
     
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -440,9 +356,9 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     print("Telegram бот запущен...")
-    
-    # run_polling с увеличенным числом попыток подключения при старте
     application.run_polling(bootstrap_retries=10)
+
+import argparse
 
 if __name__ == "__main__":
     import time

@@ -1481,15 +1481,20 @@ def pyqt_gui_mode():
             self.bot_process.readyReadStandardOutput.connect(self._read_bot_output)
             self.bot_process.readyReadStandardError.connect(self._read_bot_error)
             self.bot_process.finished.connect(self._bot_finished)
+            self.bot_process.started.connect(self._bot_started)
+            self.bot_process.errorOccurred.connect(self._bot_error)
             
             self.bot_process.start()
-            
-            if self.bot_process.state() == QProcess.ProcessState.Running:
-                self.bot_running = True
-                self.btn_bot.setText("Остановить")
-                self.log("Бот запущен!")
-            else:
-                self.log("Ошибка запуска бота")
+        
+        def _bot_started(self):
+            self.bot_running = True
+            self.btn_bot.setText("Остановить")
+            self.log("Бот запущен!")
+        
+        def _bot_error(self, error):
+            self.log(f"Ошибка процесса: {error}")
+            self.bot_running = False
+            self.btn_bot.setText("Запустить")
         
         def _read_bot_output(self):
             try:

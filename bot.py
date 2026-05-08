@@ -42,6 +42,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Перенаправляем все логи в stdout (включая библиотеки)
+for name in logging.root.manager.loggerDict:
+    log = logging.getLogger(name)
+    for handler in log.handlers[:]:
+        if isinstance(handler, logging.StreamHandler):
+            handler.stream = sys.stdout
+
 # Константы
 SUPPORTED_EXTENSIONS = ['txt', 'pdf', 'epub', 'fb2']
 EDGE_VOICES = [

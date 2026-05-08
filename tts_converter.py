@@ -481,7 +481,9 @@ async def convert_all_chunks_async(chunks, temp_files, voice, progress_callback=
             logger.info(f"Часть {chunk_idx + 1}/{num_chunks} успешно конвертирована -> {output_path}")
             if progress_callback:
                 progress = 10 + int(60 * (chunk_idx + 1) / num_chunks)
-                progress_callback(progress)
+                result = progress_callback(progress)
+                if asyncio.iscoroutine(result):
+                    await result
                 logger.debug(f"Прогресс: {progress}%")
             return True
         else:

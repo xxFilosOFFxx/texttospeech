@@ -6,6 +6,7 @@ Telegram Bot запускатель.
 
 import sys
 import os
+import subprocess
 
 # Автоматическая активация виртуального окружения (до импортов)
 venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
@@ -256,54 +257,69 @@ async def process_and_send(update: Update, session):
         
         await progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML")
         
-        # Объединение
-        await update.message.reply_text("🔗 Объединяю файлы...")
+        # Объединение и отправка
         existing_files = [f for f in temp_files if os.path.exists(f)]
         
         if not existing_files:
             await update.message.reply_text("❌ Ошибка: не создано ни одного файла.")
             return
         
+        # Читаем все WAV/MP3 и объединяем
         audios = []
+        sr = 48000
         for f in existing_files:
-            audio_data, sr = sf.read(f)
-            audios.append(audio_data)
-        combined_audio = np.concatenate(audios)
+            if f.endswith('.mp3'):
+                # Конвертируем MP3 в WAV через ffmpeg для объединения
+                tmp_wav = f.replace('.mp3', '_tmp.wav')
+                subprocess.run(['ffmpeg', '-y', '-i', f, '-acodec', 'pcm_s16le', '-ar', '48000', tmp_wav],
+                              capture_output=True, check=True)
+                audio_data, sr = sf.read(tmp_wav)
+                audios.append(audio_data)
+                os.remove(tmp_wav)
+            else:
+                audio_data, sr = sf.read(f)
+                audios.append(audio_data)
         
-        duration_sec = len(combined_audio) / 48000
+        combined_audio = np.concatenate(audios)
+        duration_sec = len(combined_audio) / sr
         await update.message.reply_text(f"📊 Длительность: {duration_sec/60:.1f} мин", parse_mode="HTML")
         
-        # Разбиение если нужно
-        max_duration_sec = session.split_duration * 60
+        # Определяем как делить
+        max_duration_sec = session.split_duration * 60 if session.split_duration > 0 else float('inf')
         final_files = []
         
-        if session.split_duration > 0 and duration_sec > max_duration_sec:
-            await update.message.reply_text(f"✂️ Разбиваю на куски по {session.split_duration} минут...")
-            combined_path = os.path.join(temp_dir, "combined.wav")
-            sf.write(combined_path, combined_audio, 48000)
+        if duration_sec > max_duration_sec:
+            await update.message.reply_text(f"✂️ Разбиваю на куски по {session.split_duration} минут...", parse_mode="HTML")
+            samples_per_chunk = int(sr * session.split_duration * 60)
+            chunk_num = 1
             
-            if PYDUB_AVAILABLE:
-                from pydub import AudioSegment
-                audio = AudioSegment.from_wav(combined_path)
-                duration_ms = session.split_duration * 60 * 1000
+            for i in range(0, len(combined_audio), samples_per_chunk):
+                chunk = combined_audio[i:i + samples_per_chunk]
+                wav_path = os.path.join(temp_dir, f"chunk_{chunk_num}.wav")
+                sf.write(wav_path, chunk, sr)
                 
-                for i in range(0, len(audio), duration_ms):
-                    chunk = audio[i:i+duration_ms]
-                    part_file = os.path.join(temp_dir, f"output_part{len(final_files)+1}.mp3")
-                    chunk.export(part_file, format="mp3")
-                    final_files.append(part_file)
-            else:
-                final_path = os.path.join(temp_dir, "output.mp3")
-                sf.write(final_path.replace('.mp3', '.wav'), combined_audio, 48000)
-                final_files.append(final_path)
+                # Конвертируем WAV в MP3 через ffmpeg
+                mp3_path = os.path.join(temp_dir, f"{session.file_name.rsplit('.', 1)[0]}_part{chunk_num}.mp3")
+                subprocess.run(['ffmpeg', '-y', '-i', wav_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path],
+                              capture_output=True, check=True)
+                os.remove(wav_path)
+                
+                if os.path.getsize(mp3_path) < 48 * 1024 * 1024:  # Telegram limit ~48MB
+                    final_files.append(mp3_path)
+                else:
+                    await update.message.reply_text(f"⚠️ Часть {chunk_num} слишком большая, пропускаю")
+                    os.remove(mp3_path)
+                
+                chunk_num += 1
         else:
-            final_path = os.path.join(temp_dir, "output.mp3")
-            sf.write(final_path.replace('.mp3', '.wav'), combined_audio, 48000)
-            if PYDUB_AVAILABLE:
-                from pydub import AudioSegment
-                audio = AudioSegment.from_wav(final_path.replace('.mp3', '.wav'))
-                audio.export(final_path, format="mp3")
-            final_files.append(final_path)
+            # Один файл
+            wav_path = os.path.join(temp_dir, "combined.wav")
+            sf.write(wav_path, combined_audio, sr)
+            mp3_path = os.path.join(temp_dir, f"{session.file_name.rsplit('.', 1)[0]}.mp3")
+            subprocess.run(['ffmpeg', '-y', '-i', wav_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path],
+                          capture_output=True, check=True)
+            os.remove(wav_path)
+            final_files.append(mp3_path)
         
         # Отправка файлов
         await update.message.reply_text(f"📤 Отправляю {len(final_files)} файлов...", parse_mode="HTML")
@@ -311,9 +327,14 @@ async def process_and_send(update: Update, session):
         for f in final_files:
             try:
                 with open(f, "rb") as file:
-                    await update.message.reply_audio(file)
+                    await update.message.reply_document(
+                        document=file,
+                        filename=os.path.basename(f),
+                        caption=f"🎵 {os.path.basename(f)}"
+                    )
             except Exception as e:
                 logger.error(f"Ошибка отправки {f}: {e}")
+                await update.message.reply_text(f"⚠️ Не удалось отправить {os.path.basename(f)}: {str(e)}")
         
         await update.message.reply_text("✅ <b>Готово!</b>", parse_mode="HTML")
         

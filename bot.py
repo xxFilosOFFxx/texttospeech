@@ -317,7 +317,7 @@ async def process_and_send(update: Update, session):
                 pass
         user_sessions[user_id] = UserSession(user_id)
 
-async def main():
+def main():
     parser = argparse.ArgumentParser(description="Telegram Bot")
     parser.add_argument("token", help="Telegram Bot Token")
     args = parser.parse_args()
@@ -330,7 +330,8 @@ async def main():
     
     print("Telegram бот запущен...")
     
-    await application.run_polling()
+    # run_polling синхронный и сам управляет event loop
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

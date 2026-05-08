@@ -61,6 +61,7 @@ class UserSession:
         self.tts_type = "edge"
         self.voice = "ru-RU-SvetlanaNeural"
         self.waiting_for = None
+        self.available_voices = []
 
 def get_session(user_id):
     if user_id not in user_sessions:
@@ -163,34 +164,42 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif session.waiting_for == "engine":
             if text == "1":
                 session.tts_type = "edge"
-                voices = EDGE_VOICES
+                session.available_voices = EDGE_VOICES
             elif text == "2":
                 if not SILERO_AVAILABLE:
                     await update.message.reply_text("❌ Silero не установлен. Использую Edge TTS.")
                     session.tts_type = "edge"
-                    voices = EDGE_VOICES
+                    session.available_voices = EDGE_VOICES
                 else:
                     session.tts_type = "silero"
-                    voices = SILERO_VOICES
+                    session.available_voices = SILERO_VOICES
             else:
                 await update.message.reply_text("Введите 1 или 2")
                 return
             
-            voice_list = "\n".join([f"<code>{v}</code>" for v in voices])
+            voice_list = "\n".join([f"<code>{i + 1}</code> - {v}" for i, v in enumerate(session.available_voices)])
             engine_name = "Edge TTS" if session.tts_type == "edge" else "Silero"
             await update.message.reply_text(
                 f"✅ Движок: <b>{engine_name}</b>\n\n"
                 f"<b>Шаг 3 из 3</b>\n"
-                f"Выберите голос:\n\n{voice_list}",
+                f"Выберите голос (отправьте номер):\n\n{voice_list}",
                 parse_mode="HTML"
             )
             session.waiting_for = "voice"
         
         elif session.waiting_for == "voice":
-            session.voice = text
+            try:
+                voice_idx = int(text) - 1
+                if voice_idx < 0 or voice_idx >= len(session.available_voices):
+                    await update.message.reply_text(f"❌ Номер должен быть от 1 до {len(session.available_voices)}")
+                    return
+                session.voice = session.available_voices[voice_idx]
+            except ValueError:
+                await update.message.reply_text("❌ Введите номер голоса")
+                return
             
             await update.message.reply_text(
-                f"✅ Голос: <b>{text}</b>\n\n"
+                f"✅ Голос: <b>{session.voice}</b>\n\n"
                 f"🚀 <b>Начинаю конвертацию...</b>",
                 parse_mode="HTML"
             )

@@ -20,6 +20,7 @@ if os.path.exists(venv_path):
 import argparse
 import tempfile
 import shutil
+import subprocess
 from pathlib import Path
 import asyncio
 import multiprocessing
@@ -521,201 +522,149 @@ async def convert_all_chunks_async(chunks, temp_files, voice, progress_callback=
 def process_file(input_path, output_dir, voice, split_duration, silent=False, progress_callback=None, rate="+0%", tts_type="edge"):
     """
     Основная функция обработки файла.
-    Извлекает текст, конвертирует в MP3 и при необходимости разделяет на части.
-    
-    Параметры:
-        tts_type: тип TTS движка ("edge" - Edge TTS, "silero" - локальная модель Silero)
+    Извлекает текст, конвертирует в MP3, объединяет в один файл
+    и при необходимости разделяет на части по split_duration минут.
     """
-    # Создаем выходную директорию если не существует
     os.makedirs(output_dir, exist_ok=True)
     
     logger.info(f"=== НАЧАЛО ОБРАБОТКИ ФАЙЛА ===")
     logger.info(f"Входной файл: {input_path}")
     logger.info(f"Выходная папка: {output_dir}")
     logger.info(f"Голос: {voice}")
-    logger.info(f"Скорость: {rate}")
     logger.info(f"Разделение: {split_duration} минут")
     
-    logger.info("Извлечение текста из файла...")
     text = extract_text_from_file(input_path)
     logger.info(f"Извлечено символов: {len(text)}")
     
     if not text.strip():
         text = "Не удалось извлечь текста из файла."
-        logger.warning("Текст пустой!")
     
     filename = Path(input_path).stem
-    logger.info(f"Имя файла (без расширения): {filename}")
     
-    if progress_callback:
-        progress_callback(5)
-        logger.debug("Прогресс: 5% (текст извлечен)")
-    
-    logger.info("Разделение текста на куски...")
     chunks = split_text_into_chunks(text, tts_type=tts_type)
     num_chunks = len(chunks)
     logger.info(f"Текст разделен на {num_chunks} кусков")
     
-    logger.info(f"Создание временных файлов в {tempfile.gettempdir()}...")
-    # Используем .wav для Silero (лучше совместимость)
-    ext = ".wav" if tts_type == "silero" else ".mp3"
-    temp_files = [os.path.join(tempfile.gettempdir(), f"{filename}_part{i}{ext}") for i in range(num_chunks)]
-    logger.info(f"Создано {len(temp_files)} временных файлов")
-    
-    if tts_type == "silero":
-        logger.info("=== НАЧАЛО КОНВЕРТАЦИИ SILERO ===")
-        convert_all_chunks_silero(chunks, temp_files, voice, progress_callback)
-    else:
-        logger.info("=== НАЧАЛО АСИНХРОННОЙ КОНВЕРТАЦИИ ===")
-        asyncio.run(convert_all_chunks_async(chunks, temp_files, voice, progress_callback, rate))
-    
-    logger.info("=== КОНВЕРТАЦИЯ ЗАВЕРШЕНА ===")
-    logger.info("Проверка существования временных файлов...")
-    for i, f in enumerate(temp_files):
-        exists = os.path.exists(f)
-        size = os.path.getsize(f) if exists else 0
-        logger.debug(f"Файл {i}: {f} - существует: {exists}, размер: {size}")
-    
-    existing_files = [f for f in temp_files if os.path.exists(f)]
-    logger.info(f"Существует файлов: {len(existing_files)}/{len(temp_files)}")
-    
-    if not existing_files:
-        logger.error("НИ ОДНОГО ВРЕМЕННОГО ФАЙЛА НЕ СОЗДАНО!")
-        raise Exception("Конвертация не создала ни одного файла")
-    
-    logger.info(f"Подготовка к финальной обработке ({len(existing_files)} файлов)...")
-    logger.info(f"split_duration={split_duration} минут")
-    
-    # Всегда объединяем куски в один файл
-    logger.info("=== ОБЪЕДИНЕНИЕ В ОДИН ФАЙЛ ===")
-    
-    if len(existing_files) > 1:
-        if PYDUB_AVAILABLE:
-            try:
-                logger.info("Объединение через pydub...")
-                combined = AudioSegment.from_file(existing_files[0])
-                logger.info(f"Первый файл: {len(combined)/1000:.1f} сек")
-                for i, f in enumerate(existing_files[1:], 1):
-                    logger.info(f"Добавляю файл {i + 1}/{len(existing_files)}...")
-                    combined += AudioSegment.from_file(f)
-                logger.info(f"Общая длительность: {len(combined)/1000:.1f} сек")
-                combined_file = os.path.join(tempfile.gettempdir(), f"{filename}_combined.mp3")
-                combined.export(combined_file, format="mp3")
-                combined_path = combined_file
-            except Exception as e:
-                logger.error(f"Ошибка pydub: {e}, пробую soundfile...")
-                import soundfile as sf
-                import numpy as np
-                audios = []
-                for f in existing_files:
-                    audio_data, sr = sf.read(f)
-                    audios.append(audio_data)
-                combined_audio = np.concatenate(audios)
-                combined_file = os.path.join(tempfile.gettempdir(), f"{filename}_combined.wav")
-                sf.write(combined_file, combined_audio, 48000)
-                combined_path = combined_file
-        else:
-            # Бинарное объединение - только для MP3
-            is_mp3 = existing_files[0].lower().endswith('.mp3')
-            if is_mp3:
-                logger.info("Бинарное объединение MP3...")
-                combined_file = os.path.join(tempfile.gettempdir(), f"{filename}_combined.mp3")
-                with open(combined_file, "wb") as out:
-                    for f in existing_files:
-                        with open(f, "rb") as inp:
-                            out.write(inp.read())
-                combined_path = combined_file
-            else:
-                # Для WAV используем soundfile
-                import soundfile as sf
-                import numpy as np
-                logger.info("Объединение WAV через soundfile...")
-                audios = []
-                for f in existing_files:
-                    audio_data, sr = sf.read(f)
-                    audios.append(audio_data)
-                combined_audio = np.concatenate(audios)
-                combined_file = os.path.join(tempfile.gettempdir(), f"{filename}_combined.wav")
-                sf.write(combined_file, combined_audio, 48000)
-                combined_path = combined_file
-    elif len(existing_files) == 1:
-        combined_path = existing_files[0]
-    else:
-        logger.error("Нет файлов для объединения!")
-        raise Exception("Нет файлов для объединения")
-    
-    # Теперь разбиваем на куски если нужно
-    if split_duration > 0:
-        logger.info("=== РАЗДЕЛЕНИЕ НА КУСКИ ===")
+    # Конвертируем каждую часть во временную директорию
+    tmpdir = tempfile.mkdtemp(dir=output_dir)
+    try:
+        temp_files = [os.path.join(tmpdir, f"chunk{i}.mp3") for i in range(num_chunks)]
         
-        try:
-            # Проверяем длительность через pydub (поддерживает MP3)
-            if PYDUB_AVAILABLE:
-                audio = AudioSegment.from_file(combined_path)
-                duration_sec = len(audio) / 1000
-            else:
-                import soundfile as sf
-                data, sr = sf.read(combined_path)
-                duration_sec = len(data) / sr
-            
-            logger.info(f"Длительность: {duration_sec:.1f} сек ({duration_sec/60:.1f} мин)")
-            
-            max_duration_sec = split_duration * 60
-            if duration_sec > max_duration_sec:
-                logger.info(f"Разбиваем на куски по {split_duration} минут...")
-                result_files = split_audio(combined_path, output_dir, filename, split_duration)
-            else:
-                # Файл короче - конвертируем в MP3 если WAV
-                final_name = os.path.join(output_dir, f"{filename}.mp3")
-                if combined_path.lower().endswith('.wav'):
-                    if PYDUB_AVAILABLE:
-                        audio = AudioSegment.from_wav(combined_path)
-                        audio.export(final_name, format="mp3")
-                        os.remove(combined_path)
-                    else:
-                        import soundfile as sf
-                        data, sr = sf.read(combined_path)
-                        sf.write(final_name.replace('.mp3', '.wav'), data, sr)
-                        if PYDUB_AVAILABLE:
-                            audio = AudioSegment.from_wav(final_name.replace('.mp3', '.wav'))
-                            audio.export(final_name, format="mp3")
-                        else:
-                            shutil.move(combined_path, final_name)
-                else:
-                    shutil.move(combined_path, final_name)
-                result_files = [final_name]
-        except Exception as e:
-            logger.error(f"Ошибка разбиения: {e}, перемещаем как есть")
-            final_name = os.path.join(output_dir, f"{filename}.mp3")
-            try:
-                shutil.move(combined_path, final_name)
-            except:
-                pass
-            result_files = [final_name] if os.path.exists(final_name) else []
-    else:
-        # split_duration == 0 - просто перемещаем
-        final_name = os.path.join(output_dir, f"{filename}.mp3")
-        if combined_path.lower().endswith('.mp3'):
-            shutil.move(combined_path, final_name)
-            result_files = [final_name]
+        logger.info("=== НАЧАЛО КОНВЕРТАЦИИ ===")
+        
+        if tts_type == "silero":
+            convert_all_chunks_silero(chunks, temp_files, voice, progress_callback)
         else:
-            try:
-                from pydub import AudioSegment
-                audio = AudioSegment.from_file(combined_path)
-                audio.export(final_name, format="mp3")
-                os.remove(combined_path)
-                result_files = [final_name]
-            except:
-                shutil.move(combined_path, final_name)
-                result_files = [final_name]
+            asyncio.run(convert_all_chunks_async(chunks, temp_files, voice, progress_callback, rate))
+        
+        existing_parts = [f for f in temp_files if os.path.exists(f)]
+        existing_parts.sort()  # По порядку: chunk0, chunk1, ...
+        logger.info(f"Создано {len(existing_parts)} частей")
+        
+        if not existing_parts:
+            raise Exception("Конвертация не создала ни одного файла")
+        
+        # === ОБЪЕДИНЯЕМ все части в один файл ===
+        logger.info("=== ОБЪЕДИНЕНИЕ ВСЕХ ЧАСТЕЙ В ОДИН ФАЙЛ ===")
+        combined_path = os.path.join(tmpdir, "combined.mp3")
+        
+        if len(existing_parts) == 1:
+            # Один чанк — просто копируем
+            shutil.copy2(existing_parts[0], combined_path)
+        else:
+            # Создаём concat-файл для ffmpeg
+            concat_file = os.path.join(tmpdir, "concat_list.txt")
+            with open(concat_file, 'w') as f:
+                for part in existing_parts:
+                    abs_part = os.path.abspath(part)
+                    f.write(f"file '{abs_part}'\n")
+            
+            ret = subprocess.run([
+                'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                '-i', concat_file, '-c', 'copy', combined_path
+            ], capture_output=True, text=True)
+            
+            if ret.returncode != 0:
+                logger.warning(f"ffmpeg concat не удался ({ret.stderr[:200]}), пробуем перекодирование")
+                ret2 = subprocess.run([
+                    'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                    '-i', concat_file, '-c:a', 'libmp3lame', '-q:a', '2', combined_path
+                ], capture_output=True, text=True)
+                
+                if ret2.returncode != 0:
+                    raise Exception(f"Не удалось объединить аудио: {ret2.stderr[:300]}")
+        
+        total_duration = get_audio_duration(combined_path)
+        logger.info(f"Объединённый файл: {total_duration:.1f} сек ({total_duration/60:.1f} мин)")
+        
+        # === РАЗДЕЛЯЕМ или сохраняем ===
+        if split_duration <= 0:
+            # Один большой файл
+            final_name = f"{filename}.mp3"
+            final_path = os.path.join(output_dir, final_name)
+            shutil.move(combined_path, final_path)
+            logger.info(f"Сохранён единый файл: {final_path}")
+            return [final_path]
+        
+        # Разделяем на куски по N минут
+        logger.info(f"=== РАЗДЕЛЕНИЕ НА КУСКИ ПО {split_duration} МИНУТ ===")
+        max_dur = split_duration * 60
+        
+        if total_duration <= max_dur:
+            # Файл короче указанного интервала — сохраняем как есть
+            final_name = f"{filename}.mp3"
+            final_path = os.path.join(output_dir, final_name)
+            shutil.move(combined_path, final_path)
+            return [final_path]
+        
+        result_files = []
+        chunk_num = 1
+        start_sec = 0.0
+        
+        while start_sec < total_duration:
+            end_sec = min(start_sec + max_dur, total_duration)
+            out_file = os.path.join(output_dir, f"{filename}_part{chunk_num}.mp3")
+            
+            ret = subprocess.run([
+                'ffmpeg', '-y', '-i', combined_path,
+                '-ss', str(start_sec), '-to', str(end_sec),
+                '-c:a', 'libmp3lame', '-q:a', '2', out_file
+            ], capture_output=True, text=True)
+            
+            if ret.returncode == 0 and os.path.exists(out_file):
+                result_files.append(out_file)
+                logger.info(f"Создана часть {chunk_num}: {os.path.getsize(out_file)} bytes")
+                chunk_num += 1
+            else:
+                logger.error(f"Ошибка ffmpeg для части {chunk_num}: {ret.stderr[:300]}")
+            
+            start_sec = end_sec
+        
+        return result_files
     
-    # Удаляем временные файлы после завершения
-    for f in existing_files:
-        if f != combined_path:
-            try:
-                os.remove(f)
-            except:
-                pass
+    finally:
+        try:
+            shutil.rmtree(tmpdir)
+        except:
+            pass
+    
+    logger.info(f"Разделение завершено, создано {len(result_files)} файлов")
+    return result_files
+
+
+def get_audio_duration(filepath):
+    """Получает длительность аудио файла через ffprobe."""
+    try:
+        result = subprocess.run([
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', filepath
+        ], capture_output=True, text=True, timeout=10)
+        return float(result.stdout.strip())
+    except Exception as e:
+        # Fallback: пробуем через звук
+        import soundfile as sf
+        data, sr = sf.read(filepath)
+        return len(data) / sr
     
     if not silent:
         for f in result_files:

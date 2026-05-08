@@ -160,12 +160,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [venv_python, converter, '-i', session.file_path, '-o', temp_dir,
              '-v', session.voice, '-s', str(session.split_duration)],
             cwd=os.path.dirname(os.path.abspath(__file__)),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
         )
         
         # Сохраняем PID процесса
         active_conversions[user_id]['pid'] = process.pid
+        active_conversions[user_id]['log_file'] = os.path.join(temp_dir, '.converter.log')
+        
+        # Записываем лог в файл
+        def capture_log():
+            with open(active_conversions[user_id]['log_file'], 'w') as logf:
+                for line in process.stdout:
+                    logf.write(line)
+        
+        threading.Thread(target=capture_log, daemon=True).start()
 
 async def conversion_poller(application):
     """Периодически проверяет завершённые конвертации и отправляет файлы."""
@@ -192,7 +202,7 @@ async def conversion_poller(application):
                 # Проверяем таймаут
                 if time.time() - conv['start_time'] > 1800:
                     try:
-                        await bot.send_message(chat_id=conv['chat_id'], text="⏰ Таймаут конвертации")
+                        await bot.send_message(chat_id=conv['chat_id'], text="⏰ Таймаут конвертации (30 мин)")
                     except:
                         pass
                     del active_conversions[user_id]
@@ -202,17 +212,66 @@ async def conversion_poller(application):
                         pass
                 continue
             
-            # Процесс завершён — ищем аудио файлы
+            # Процесс завершён — проверяем результат
+            log_file = conv.get('log_file')
+            error_info = ""
+            if log_file and os.path.exists(log_file):
+                try:
+                    with open(log_file, 'r') as f:
+                        log_content = f.read()
+                    # Ищем ошибки (Traceback, ERROR, Exception, Error)
+                    for line in log_content.splitlines():
+                        if 'Traceback' in line or 'ERROR' in line or 'Exception' in line:
+                            error_info = line.split(' - ')[-1] if ' - ' in line else line
+                            break
+                        if line.strip().startswith(('FileNotFoundError', 'ValueError', 'TypeError', 'RuntimeError', 'OSError', 'PermissionError')):
+                            error_info = line.strip()
+                            break
+                except:
+                    pass
+            
+            del active_conversions[user_id]
+            
+            # Если есть ошибка — сообщаем пользователю
+            if error_info:
+                try:
+                    await bot.send_message(chat_id=conv['chat_id'], text=f"❌ Ошибка конвертации: {error_info}")
+                except:
+                    pass
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                continue
+            
+            # Ищем аудио файлы (финальные результаты конвертации)
             audio_files = [f for f in os.listdir(temp_dir) 
                         if (f.endswith('.mp3') or f.endswith('.wav')) 
-                        and f != 'preview.mp3' and not f.startswith('chunk_')]
+                        and f != 'preview.mp3' and not f.startswith('chunk_')
+                        and not f.startswith('.')]
             
             if not audio_files:
                 try:
                     await bot.send_message(chat_id=conv['chat_id'], text="❌ Не удалось создать аудио")
                 except:
                     pass
-                del active_conversions[user_id]
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                continue
+            
+            # Сортируем с учётом чисел (part2 перед part10)
+            import re
+            def natural_sort_key(s):
+                return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
+            audio_files.sort(key=natural_sort_key)
+            
+            if not audio_files:
+                try:
+                    await bot.send_message(chat_id=conv['chat_id'], text="❌ Не удалось создать аудио")
+                except:
+                    pass
                 try:
                     shutil.rmtree(temp_dir)
                 except:
@@ -220,8 +279,6 @@ async def conversion_poller(application):
                 continue
             
             # Отправляем файлы
-            del active_conversions[user_id]
-            
             for audio_file in sorted(audio_files):
                 fp = os.path.join(temp_dir, audio_file)
                 try:

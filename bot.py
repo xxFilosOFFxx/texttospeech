@@ -7,6 +7,7 @@ Telegram Bot запускатель.
 import sys
 import os
 import subprocess
+import asyncio
 
 # Автоматическая активация виртуального окружения (до импортов)
 venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv')
@@ -238,39 +239,55 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
             
+            # Копируем данные сессии для фоновой задачи
+            session_data = {
+                'file_path': session.file_path,
+                'file_name': session.file_name,
+                'split_duration': session.split_duration,
+                'tts_type': session.tts_type,
+                'voice': session.voice,
+                'temp_dir': os.path.dirname(session.file_path),
+            }
             session.waiting_for = None
-            await process_and_send(update, session)
+            user_sessions[user_id] = UserSession(user_id)
+            
+            # Запускаем конвертацию как фоновую задачу чтобы не блокировать других пользователей
+            asyncio.create_task(process_and_send(update, session_data))
             
     except Exception as e:
         logger.error(f"Ошибка в handle_text: {e}")
         await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
         session.waiting_for = None
 
-async def process_and_send(update: Update, session):
-    user_id = update.effective_user.id
+async def process_and_send(update: Update, session_data: dict):
+    """
+    Обработка и конвертация в фоновой задаче.
+    session_data — dict с параметрами конвертации.
+    """
+    message = update.message
     
     try:
-        await safe_reply_text(update.message, "📖 Извлекаю текст из файла...")
-        text = extract_text_from_file(session.file_path)
+        await safe_reply_text(message, "📖 Извлекаю текст из файла...")
+        text = extract_text_from_file(session_data['file_path'])
         if not text.strip():
-            await safe_reply_text(update.message, "❌ Не удалось извлечь текст из файла.")
+            await safe_reply_text(message, "❌ Не удалось извлечь текст из файла.")
             return
         
-        await safe_reply_text(update.message, "✂️ Разбиваю текст на части...")
-        chunks = split_text_into_chunks(text, tts_type=session.tts_type)
+        await safe_reply_text(message, "✂️ Разбиваю текст на части...")
+        chunks = split_text_into_chunks(text, tts_type=session_data['tts_type'])
         num_chunks = len(chunks)
         
-        temp_dir = os.path.dirname(session.file_path)
-        ext = ".wav" if session.tts_type == "silero" else ".mp3"
+        temp_dir = session_data['temp_dir']
+        ext = ".wav" if session_data['tts_type'] == "silero" else ".mp3"
         temp_files = [os.path.join(temp_dir, f"part{i}{ext}") for i in range(num_chunks)]
         
-        progress_msg = await retry_api_call(lambda: update.message.reply_text(
+        progress_msg = await retry_api_call(lambda: message.reply_text(
             f"🎙 Конвертирую...\n0/{num_chunks} частей",
             parse_mode="HTML"
         ))
         
-        if session.tts_type == "silero":
-            convert_all_chunks_silero(chunks, temp_files, session.voice)
+        if session_data['tts_type'] == "silero":
+            convert_all_chunks_silero(chunks, temp_files, session_data['voice'])
         else:
             last_update = 0
             async def progress_callback(p):
@@ -286,7 +303,7 @@ async def process_and_send(update: Update, session):
                     except:
                         pass
             
-            await convert_all_chunks_async(chunks, temp_files, session.voice, progress_callback, "+0%")
+            await convert_all_chunks_async(chunks, temp_files, session_data['voice'], progress_callback, "+0%")
         
         await retry_api_call(lambda: progress_msg.edit_text(f"✅ Конвертировано {num_chunks} частей", parse_mode="HTML"))
         
@@ -294,7 +311,7 @@ async def process_and_send(update: Update, session):
         existing_files = [f for f in temp_files if os.path.exists(f)]
         
         if not existing_files:
-            await safe_reply_text(update.message, "❌ Ошибка: не создано ни одного файла.")
+            await safe_reply_text(message, "❌ Ошибка: не создано ни одного файла.")
             return
         
         # Читаем все WAV/MP3 и объединяем
@@ -315,15 +332,15 @@ async def process_and_send(update: Update, session):
         
         combined_audio = np.concatenate(audios)
         duration_sec = len(combined_audio) / sr
-        await safe_reply_text(update.message, f"📊 Длительность: {duration_sec/60:.1f} мин", parse_mode="HTML")
+        await safe_reply_text(message, f"📊 Длительность: {duration_sec/60:.1f} мин", parse_mode="HTML")
         
         # Определяем как делить
-        max_duration_sec = session.split_duration * 60 if session.split_duration > 0 else float('inf')
+        max_duration_sec = session_data['split_duration'] * 60 if session_data['split_duration'] > 0 else float('inf')
         final_files = []
         
         if duration_sec > max_duration_sec:
-            await safe_reply_text(update.message, f"✂️ Разбиваю на куски по {session.split_duration} минут...", parse_mode="HTML")
-            samples_per_chunk = int(sr * session.split_duration * 60)
+            await safe_reply_text(message, f"✂️ Разбиваю на куски по {session_data['split_duration']} минут...", parse_mode="HTML")
+            samples_per_chunk = int(sr * session_data['split_duration'] * 60)
             chunk_num = 1
             
             for i in range(0, len(combined_audio), samples_per_chunk):
@@ -332,7 +349,8 @@ async def process_and_send(update: Update, session):
                 sf.write(wav_path, chunk, sr)
                 
                 # Конвертируем WAV в MP3 через ffmpeg
-                mp3_path = os.path.join(temp_dir, f"{session.file_name.rsplit('.', 1)[0]}_part{chunk_num}.mp3")
+                file_name = session_data['file_name']
+                mp3_path = os.path.join(temp_dir, f"{file_name.rsplit('.', 1)[0]}_part{chunk_num}.mp3")
                 subprocess.run(['ffmpeg', '-y', '-i', wav_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path],
                               capture_output=True, check=True)
                 os.remove(wav_path)
@@ -340,49 +358,49 @@ async def process_and_send(update: Update, session):
                 if os.path.getsize(mp3_path) < 48 * 1024 * 1024:  # Telegram limit ~48MB
                     final_files.append(mp3_path)
                 else:
-                    await safe_reply_text(update.message, f"⚠️ Часть {chunk_num} слишком большая, пропускаю")
+                    await safe_reply_text(message, f"⚠️ Часть {chunk_num} слишком большая, пропускаю")
                     os.remove(mp3_path)
                 
                 chunk_num += 1
         else:
             # Один файл
+            file_name = session_data['file_name']
             wav_path = os.path.join(temp_dir, "combined.wav")
             sf.write(wav_path, combined_audio, sr)
-            mp3_path = os.path.join(temp_dir, f"{session.file_name.rsplit('.', 1)[0]}.mp3")
+            mp3_path = os.path.join(temp_dir, f"{file_name.rsplit('.', 1)[0]}.mp3")
             subprocess.run(['ffmpeg', '-y', '-i', wav_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path],
                           capture_output=True, check=True)
             os.remove(wav_path)
             final_files.append(mp3_path)
         
         # Отправка файлов
-        await safe_reply_text(update.message, f"📤 Отправляю {len(final_files)} файлов...", parse_mode="HTML")
+        await safe_reply_text(message, f"📤 Отправляю {len(final_files)} файлов...", parse_mode="HTML")
         
         for f in final_files:
             try:
                 with open(f, "rb") as file:
                     doc_data = file.read()
-                    await retry_api_call(lambda: update.message.reply_document(
+                    await retry_api_call(lambda: message.reply_document(
                         document=doc_data,
                         filename=os.path.basename(f),
                         caption=f"🎵 {os.path.basename(f)}"
                     ))
             except Exception as e:
                 logger.error(f"Ошибка отправки {f}: {e}")
-                await safe_reply_text(update.message, f"⚠️ Не удалось отправить {os.path.basename(f)}: {str(e)}")
+                await safe_reply_text(message, f"⚠️ Не удалось отправить {os.path.basename(f)}: {str(e)}")
         
-        await safe_reply_text(update.message, "✅ <b>Готово!</b>", parse_mode="HTML")
+        await safe_reply_text(message, "✅ <b>Готово!</b>", parse_mode="HTML")
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        await safe_reply_text(update.message, f"❌ Ошибка: {str(e)}")
+        await safe_reply_text(message, f"❌ Ошибка: {str(e)}")
     
     finally:
-        if session.file_path and os.path.exists(os.path.dirname(session.file_path)):
+        if session_data.get('file_path') and os.path.exists(os.path.dirname(session_data['file_path'])):
             try:
-                shutil.rmtree(os.path.dirname(session.file_path))
+                shutil.rmtree(os.path.dirname(session_data['file_path']))
             except:
                 pass
-        user_sessions[user_id] = UserSession(user_id)
 
 def main():
     parser = argparse.ArgumentParser(description="Telegram Bot")

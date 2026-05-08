@@ -156,13 +156,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         venv_python = os.path.join(venv_path, 'bin', 'python')
         converter = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tts_converter.py')
         
-        subprocess.Popen(
+        process = subprocess.Popen(
             [venv_python, converter, '-i', session.file_path, '-o', temp_dir,
              '-v', session.voice, '-s', str(session.split_duration)],
             cwd=os.path.dirname(os.path.abspath(__file__)),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
+        
+        # Сохраняем PID процесса
+        active_conversions[user_id]['pid'] = process.pid
 
 async def conversion_poller(application):
     """Периодически проверяет завершённые конвертации и отправляет файлы."""
@@ -173,16 +176,23 @@ async def conversion_poller(application):
         for user_id in list(active_conversions.keys()):
             conv = active_conversions[user_id]
             temp_dir = conv['temp_dir']
+            pid = conv.get('pid')
             
-            # Проверяем завершение через наличие MP3 файлов
-            mp3_files = [f for f in os.listdir(temp_dir) 
-                        if f.endswith('.mp3') and f != 'preview.mp3']
+            # Проверяем жив ли процесс
+            process_done = False
+            if pid:
+                try:
+                    os.kill(pid, 0)  # Проверяем существование
+                except OSError:
+                    process_done = True
+            else:
+                process_done = True  # Если PID нет, считаем что процесс завершён
             
-            if not mp3_files:
-                # Проверяем не слишком ли долго ждём (таймаут 30 мин)
+            if not process_done:
+                # Проверяем таймаут
                 if time.time() - conv['start_time'] > 1800:
                     try:
-                        await bot.send_message(chat_id=conv['chat_id'], text="⏰ Таймаут конвертации (30 мин)")
+                        await bot.send_message(chat_id=conv['chat_id'], text="⏰ Таймаут конвертации")
                     except:
                         pass
                     del active_conversions[user_id]
@@ -192,18 +202,35 @@ async def conversion_poller(application):
                         pass
                 continue
             
-            # Конвертация завершена — отправляем файлы
+            # Процесс завершён — ищем аудио файлы
+            audio_files = [f for f in os.listdir(temp_dir) 
+                        if (f.endswith('.mp3') or f.endswith('.wav')) 
+                        and f != 'preview.mp3' and not f.startswith('chunk_')]
+            
+            if not audio_files:
+                try:
+                    await bot.send_message(chat_id=conv['chat_id'], text="❌ Не удалось создать аудио")
+                except:
+                    pass
+                del active_conversions[user_id]
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                continue
+            
+            # Отправляем файлы
             del active_conversions[user_id]
             
-            for mp3_file in sorted(mp3_files):
-                fp = os.path.join(temp_dir, mp3_file)
+            for audio_file in sorted(audio_files):
+                fp = os.path.join(temp_dir, audio_file)
                 try:
                     with open(fp, "rb") as f:
                         await bot.send_document(
                             chat_id=conv['chat_id'],
                             document=f,
-                            filename=mp3_file,
-                            caption=f"🎵 {mp3_file}"
+                            filename=audio_file,
+                            caption=f"🎵 {audio_file}"
                         )
                 except Exception as e:
                     logger.error(f"Ошибка отправки: {e}")

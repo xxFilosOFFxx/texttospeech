@@ -1172,6 +1172,7 @@ def pyqt_gui_mode():
             self.is_converting = False  # Флаг конвертации
             self.conversion_thread = None  # Поток конвертации
             self.bot_running = False  # Флаг работы бота
+            self.bot_process = None  # Процесс бота
             
             # Доступные голоса Edge TTS
             voices = [
@@ -1461,6 +1462,9 @@ def pyqt_gui_mode():
                 self.log("Остановка Telegram бота...")
                 self.bot_running = False
                 self.btn_bot.setText("Запустить")
+                if self.bot_process:
+                    self.bot_process.terminate()
+                    self.bot_process = None
                 self.log("Бот остановлен")
                 return
             
@@ -1468,45 +1472,26 @@ def pyqt_gui_mode():
             self.bot_running = True
             self.btn_bot.setText("Остановить")
             
-            from threading import Thread
-            from telegram.ext import Application
+            import subprocess
+            venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv', 'bin', 'python')
+            bot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.py')
+            self.bot_process = subprocess.Popen(
+                [venv_python, bot_script, token],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
             
-            def run_bot():
-                import asyncio
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    async def start_bot():
-                        application = Application.builder().token(token).build()
-                        application.add_handler(CommandHandler("start", start_command))
-                        application.add_handler(CommandHandler("help", help_command))
-                        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-                        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-                        
-                        await application.initialize()
-                        await application.start()
-                        queue = application.updater.start_polling()
-                        
-                        self.log("Бот запущен!")
-                        
-                        while self.bot_running:
-                            await asyncio.sleep(1)
-                        
-                        self.log("Остановка бота...")
-                        application.updater.stop()
-                        await application.stop()
-                    
-                    loop.run_until_complete(start_bot())
-                except Exception as e:
-                    self.log(f"Ошибка бота: {e}")
-                finally:
-                    loop.close()
-                    self.bot_running = False
-                    self.log("Бот остановлен")
+            import threading
+            def read_output():
+                for line in iter(self.bot_process.stdout.readline, ''):
+                    if not self.bot_running:
+                        break
+                    self.log(line.strip())
             
-            thread = Thread(target=run_bot, daemon=True)
-            thread.start()
+            threading.Thread(target=read_output, daemon=True).start()
+            self.log("Бот запущен в отдельном процессе")
 
     app = QApplication(sys.argv)
     window = TextToSpeechApp()

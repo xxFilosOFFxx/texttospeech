@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Telegram Bot запускатель.
-Запускает бота в main thread для избежания проблем с asyncio signal handler.
+Запускает бота в отдельном процессе.
 """
 
 import asyncio
-import signal
 import sys
 import os
 
@@ -70,6 +69,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎙 <b>Text to Speech Converter</b>\n\n"
         "Отправьте мне текстовый файл (TXT, PDF, EPUB, FB2) - я конвертирую его в MP3 аудио.\n\n"
         "После отправки файла я задам несколько вопросов о параметрах конвертации.",
+        parse_mode="HTML"
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 <b>Помощь</b>\n\n"
+        "Отправьте текстовый файл для конвертации.\n"
+        "Команды: /start - начать, /help - помощь",
         parse_mode="HTML"
     )
 
@@ -317,20 +324,11 @@ async def main():
     
     application = Application.builder().token(args.token).build()
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     print("Telegram бот запущен...")
-    
-    # Запускаем с обработкой сигналов
-    loop = asyncio.get_event_loop()
-    
-    # Обработка Ctrl+C
-    def signal_handler(sig, frame):
-        print("\nОстановка бота...")
-        application.stop()
-    
-    signal.signal(signal.SIGINT, signal_handler)
     
     await application.run_polling()
 
